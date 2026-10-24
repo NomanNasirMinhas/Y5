@@ -41,7 +41,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_YOUR_PUBKEY_RUN_tauri_signer_generate",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI1QTBGRDFCNDUyMTM3RDcKUldUWE55RkZHLzJnSlM0Z29VSktnbytyUnZ4YlUyL09XRitnbVlzSmZvVHU3OVl1VTlyeHVVSXoK",
       "endpoints": [
         "https://github.com/NomanNasirMinhas/Y5/releases/latest/download/latest_version.json"
       ],
