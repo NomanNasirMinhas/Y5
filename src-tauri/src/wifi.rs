@@ -27,7 +27,7 @@ pub fn list_interfaces() -> Result<Vec<WirelessInterface>, String> {
 }
 
 fn list_linux() -> Result<Vec<WirelessInterface>, String> {
-    let mut ifaces = if let Ok(out) = process::run("iw", &["dev"]) {
+    let mut ifaces = if let Ok(out) = process::run_bounded("iw", &["dev"]) {
         if out.status.success() {
             parse_iw_dev(&String::from_utf8_lossy(&out.stdout))
         } else {
@@ -38,13 +38,13 @@ fn list_linux() -> Result<Vec<WirelessInterface>, String> {
     };
     if ifaces.is_empty() {
         // Fall back to `ip`; keep only wireless-looking names.
-        if let Ok(out) = process::run("ip", &["-o", "link", "show"]) {
+        if let Ok(out) = process::run_bounded("ip", &["-o", "link", "show"]) {
             if out.status.success() {
                 ifaces = parse_ip_link(&String::from_utf8_lossy(&out.stdout));
             }
         }
     }
-    let states = process::run("ip", &["-o", "link", "show"])
+    let states = process::run_bounded("ip", &["-o", "link", "show"])
         .ok()
         .filter(|o| o.status.success())
         .map(|o| parse_ip_state(&String::from_utf8_lossy(&o.stdout)))
@@ -61,18 +61,19 @@ fn list_linux() -> Result<Vec<WirelessInterface>, String> {
 }
 
 fn list_windows() -> Result<Vec<WirelessInterface>, String> {
-    let out = process::run("netsh", &["wlan", "show", "interfaces"]).map_err(|e| e.to_string())?;
+    let out = process::run_bounded("netsh", &["wlan", "show", "interfaces"])
+        .map_err(|e| e.to_string())?;
     Ok(parse_netsh(&String::from_utf8_lossy(&out.stdout)))
 }
 
 fn list_macos() -> Result<Vec<WirelessInterface>, String> {
     // Best-effort: report the Wi-Fi hardware port and its MAC via `ifconfig`.
     let mut out = Vec::new();
-    if let Ok(ports) = process::run("networksetup", &["-listallhardwareports"]) {
+    if let Ok(ports) = process::run_bounded("networksetup", &["-listallhardwareports"]) {
         let text = String::from_utf8_lossy(&ports.stdout).into_owned();
         if let Some(dev) = wifi_device(&text) {
             let mut mac = String::new();
-            if let Ok(cfg) = process::run("ifconfig", &[&dev]) {
+            if let Ok(cfg) = process::run_bounded("ifconfig", &[&dev]) {
                 let cfg = String::from_utf8_lossy(&cfg.stdout).into_owned();
                 mac = cfg
                     .lines()
@@ -253,20 +254,29 @@ fn parse_netsh(text: &str) -> Vec<WirelessInterface> {
 
 /// Start monitor mode for `interface`, returning the monitor interface name.
 pub fn start_monitor(interface: &str) -> Result<String, String> {
+    if list_interfaces()?
+        .iter()
+        .any(|i| i.name == interface && i.interface_type == "monitor")
+    {
+        return Ok(interface.into());
+    }
     if platform() != Platform::Linux {
         return Err("Monitor mode requires Linux with a compatible wireless chipset.".into());
     }
     require("airmon-ng")?;
-    let out = process::run("airmon-ng", &["start", interface]).map_err(|e| e.to_string())?;
+    let out =
+        process::run_bounded("airmon-ng", &["start", interface]).map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(combined(&out));
     }
-    // Find the freshly created monitor interface via `iw dev`.
+    // Match this radio, never another adapter that was already in monitor mode.
     let ifaces = list_linux()?;
     ifaces
         .iter()
-        .find(|i| i.interface_type == "monitor" && i.name != interface)
-        .or_else(|| ifaces.iter().find(|i| i.interface_type == "monitor"))
+        .find(|i| {
+            i.interface_type == "monitor"
+                && (i.name == interface || i.name == format!("{interface}mon"))
+        })
         .map(|i| i.name.clone())
         .ok_or_else(|| "airmon-ng completed but no monitor interface appeared.".into())
 }
@@ -275,10 +285,43 @@ pub fn stop_monitor(interface: &str) -> Result<String, String> {
     if platform() != Platform::Linux {
         return Err("Monitor mode requires Linux.".into());
     }
+    if list_interfaces()?
+        .iter()
+        .any(|i| i.name == interface && i.interface_type == "managed")
+    {
+        return Ok(format!("{interface} is already in managed mode."));
+    }
     require("airmon-ng")?;
-    let out = process::run("airmon-ng", &["stop", interface]).map_err(|e| e.to_string())?;
+    let out = process::run_bounded("airmon-ng", &["stop", interface]).map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(combined(&out));
+    }
+    let after = list_interfaces()?;
+    if after
+        .iter()
+        .any(|i| i.name == interface && i.interface_type == "monitor")
+    {
+        require("ip")?;
+        require("iw")?;
+        for (program, args) in [
+            ("ip", vec!["link", "set", interface, "down"]),
+            ("iw", vec!["dev", interface, "set", "type", "managed"]),
+            ("ip", vec!["link", "set", interface, "up"]),
+        ] {
+            let result = process::run_bounded(program, &args).map_err(|e| e.to_string())?;
+            if !result.status.success() {
+                return Err(combined(&result));
+            }
+        }
+    }
+    let base = interface.strip_suffix("mon").unwrap_or(interface);
+    if !list_interfaces()?
+        .iter()
+        .any(|i| (i.name == interface || i.name == base) && i.interface_type == "managed")
+    {
+        return Err(format!(
+            "Could not verify managed mode for {interface}. Refresh Interfaces."
+        ));
     }
     Ok(combined(&out))
 }
@@ -289,8 +332,21 @@ pub fn check_kill() -> Result<String, String> {
         return Err("check-kill requires Linux.".into());
     }
     require("airmon-ng")?;
-    let out = process::run("airmon-ng", &["check", "kill"]).map_err(|e| e.to_string())?;
+    let out = process::run_bounded("airmon-ng", &["check", "kill"]).map_err(|e| e.to_string())?;
     Ok(combined(&out))
+}
+
+pub fn require_monitor(interface: &str) -> Result<(), String> {
+    let interfaces = list_interfaces()?;
+    match interfaces.iter().find(|i| i.name == interface) {
+        Some(i) if i.interface_type == "monitor" => Ok(()),
+        Some(_) => Err(format!(
+            "{interface} is not in monitor mode. Enable monitor mode in Interfaces first."
+        )),
+        None => Err(format!(
+            "{interface} is unavailable. Refresh Interfaces and check USB passthrough."
+        )),
+    }
 }
 
 pub fn require(program: &str) -> Result<(), String> {

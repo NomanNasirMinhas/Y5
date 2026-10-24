@@ -7,6 +7,8 @@ import { Crack } from "./Crack";
 import * as bridge from "./bridge";
 import { initialSnapshot } from "./types";
 
+vi.mock("./Preflight", () => ({ Preflight: () => null }));
+
 vi.mock("./bridge", () => ({
   native: true, platform: vi.fn().mockResolvedValue("linux"),
   listInterfaces: vi.fn().mockResolvedValue([{ name: "wlan0mon", interfaceType: "monitor" }]),
@@ -18,6 +20,33 @@ vi.mock("./bridge", () => ({
 }));
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
+
+it("ignores late running snapshots after stop completes", async () => {
+  let snapshot: Parameters<typeof bridge.startScan>[2] = () => {};
+  vi.mocked(bridge.startScan).mockImplementationOnce(async (_i, _c, cb) => { snapshot = cb; });
+  render(<Scan onBusy={vi.fn()} pushLog={vi.fn()} />);
+  await screen.findByRole("option", { name: "wlan0mon (monitor)" });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Start scan" })));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Stop scan" })));
+  act(() => snapshot({ ...initialSnapshot, running: true }));
+  expect(screen.getByRole("button", { name: "Start scan" })).toBeTruthy();
+});
+
+it("hands selected networks to target review without losing channels", async () => {
+  const targets = vi.fn();
+  const networks = [1, 6].map(channel => ({ bssid: `00:11:22:33:44:0${channel}`, essid: `Lab ${channel}`, channel, power: -40, privacy: "WPA2", cipher: "CCMP", auth: "PSK", beacons: 1, dataPackets: 0, wps: false, firstSeen: 0, lastSeen: 0 }));
+  vi.mocked(bridge.startScan).mockImplementationOnce(async (_i, _c, cb) => cb({ ...initialSnapshot, networks }));
+  render(<Scan onBusy={vi.fn()} pushLog={vi.fn()} onTargets={targets} />);
+  await screen.findByRole("option", { name: "wlan0mon (monitor)" });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Start scan" })));
+  fireEvent.change(screen.getByLabelText("Selection"), { target: { value: "multiple" } });
+  fireEvent.click(screen.getByLabelText("Select Lab 1"));
+  fireEvent.click(screen.getByLabelText("Select Lab 6"));
+  fireEvent.click(screen.getByRole("button", { name: "Review selected targets" }));
+  expect(targets).toHaveBeenCalledWith(networks);
+  fireEvent.change(screen.getByLabelText("Selection"), { target: { value: "single" } });
+  expect(screen.getAllByRole("radio", { name: /^Select Lab/ }).filter(i => (i as HTMLInputElement).checked)).toHaveLength(1);
+});
 
 it("allows stopping immediately after startup, even before the first snapshot", async () => {
   const busy = vi.fn();

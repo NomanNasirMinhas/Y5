@@ -11,7 +11,7 @@ import {
   native,
   platform,
 } from "./bridge";
-import { WirelessInterface, LogEvent } from "./types";
+import { WirelessInterface, LogEvent, Network } from "./types";
 import { validateTarget } from "./validation";
 import { useJobCompletion } from "./useJobCompletion";
 
@@ -24,8 +24,10 @@ export function Attacks({
   onBusy,
   pushLog,
   visible = true,
+  targets = [],
 }: {
   visible?: boolean;
+  targets?: Network[];
   onBusy: (v: boolean) => void;
   pushLog: (e: LogEvent) => void;
 }) {
@@ -60,6 +62,12 @@ export function Attacks({
       activeMount = false;
     };
   }, [visible]);
+
+  useEffect(() => {
+    if (!active && !bursting && !pending && targets.length) {
+      setBssid(targets[0].bssid); setChannel(String(targets[0].channel)); setClient("");
+    }
+  }, [targets]);
 
   const linux = os === "linux" || !native;
   useJobCompletion("attack", active !== null && !pending, () => {
@@ -160,6 +168,14 @@ export function Attacks({
           are explicitly permitted to test.
         </span>
       </div>
+      {targets.length > 0 && <section className="toolbar">
+        <label htmlFor="review-target">Selected networks ({targets.length})</label>
+        <select id="review-target" value={targets.some(t => t.bssid === bssid) ? bssid : ""} disabled={running || bursting || pending} onChange={e => {
+          const target = targets.find(t => t.bssid === e.target.value);
+          if (target) { setBssid(target.bssid); setChannel(String(target.channel)); setClient(""); }
+        }}><option value="" disabled>Choose target</option>{targets.map(t => <option key={t.bssid} value={t.bssid}>{t.essid} · {t.bssid} · CH {t.channel}</option>)}</select>
+        <small>Review and run one target at a time on this radio.</small>
+      </section>}
       <div className="split-grid">
         <section className="panel form-panel">
           <div className="panel-heading" style={{ border: 0, padding: 0, height: "auto" }}>

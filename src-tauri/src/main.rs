@@ -4,6 +4,7 @@ mod capture;
 mod crack;
 mod hashcat;
 mod model;
+mod preflight;
 mod process;
 mod replay;
 mod updates;
@@ -17,7 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     thread::JoinHandle,
 };
-use tauri::{ipc::Channel, Manager, State};
+use tauri::{ipc::Channel, Emitter, Manager, State};
 
 struct Job {
     guard: Arc<ChildGuard>,
@@ -47,6 +48,9 @@ fn job_running(state: State<'_, AppState>, kind: String) -> Result<bool, String>
 }
 
 struct AppState {
+    restore_on_exit: std::sync::atomic::AtomicBool,
+    closing: std::sync::atomic::AtomicBool,
+    radios: Mutex<std::collections::HashSet<String>>,
     scan: Mutex<Option<Job>>,
     attack: Mutex<Option<Job>>,
     crack: Mutex<Option<Job>>,
@@ -72,21 +76,34 @@ async fn list_interfaces() -> Result<Vec<WirelessInterface>, String> {
 }
 
 #[tauri::command]
-async fn start_monitor(interface: String) -> Result<String, String> {
+async fn start_monitor(state: State<'_, AppState>, interface: String) -> Result<String, String> {
     validation::interface(&interface)?;
 
-    tauri::async_runtime::spawn_blocking(move || wifi::start_monitor(&interface))
+    let name = tauri::async_runtime::spawn_blocking(move || wifi::start_monitor(&interface))
         .await
+        .map_err(|e| e.to_string())??;
+    state
+        .radios
+        .lock()
         .map_err(|e| e.to_string())?
+        .insert(name.clone());
+    Ok(name)
 }
 
 #[tauri::command]
-async fn stop_monitor(interface: String) -> Result<String, String> {
+async fn stop_monitor(state: State<'_, AppState>, interface: String) -> Result<String, String> {
     validation::interface(&interface)?;
 
-    tauri::async_runtime::spawn_blocking(move || wifi::stop_monitor(&interface))
+    let name = interface.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || wifi::stop_monitor(&interface))
         .await
+        .map_err(|e| e.to_string())??;
+    state
+        .radios
+        .lock()
         .map_err(|e| e.to_string())?
+        .remove(&name);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -109,6 +126,12 @@ async fn start_scan(
         validation::channel(ch)?;
     }
 
+    wifi::require_monitor(&interface)?;
+    state
+        .radios
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(interface.clone());
     let mut slot = state.scan.lock().map_err(|e| e.to_string())?;
     clear_finished(&mut slot);
     if slot.is_some() {
@@ -125,14 +148,17 @@ async fn start_scan(
 }
 
 #[tauri::command]
-async fn stop_scan(state: State<'_, AppState>) -> Result<(), String> {
-    let job = state.scan.lock().map_err(|e| e.to_string())?.take();
-    if let Some(job) = job {
-        tauri::async_runtime::spawn_blocking(move || stop_job(job))
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+async fn stop_scan(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut slot = state.scan.lock().map_err(|e| e.to_string())?;
+        if let Some(job) = slot.take() {
+            stop_job(job);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -173,6 +199,12 @@ async fn start_deauth(
         validation::mac(c)?;
     }
 
+    wifi::require_monitor(&interface)?;
+    state
+        .radios
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(interface.clone());
     let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
     clear_finished(&mut slot);
     if slot.is_some() {
@@ -195,6 +227,12 @@ async fn capture_handshake(
     validation::mac(&bssid)?;
     validation::channel(channel)?;
 
+    wifi::require_monitor(&interface)?;
+    state
+        .radios
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(interface.clone());
     let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
     clear_finished(&mut slot);
     if slot.is_some() {
@@ -222,6 +260,12 @@ async fn capture_pmkid(
     validation::mac(&bssid)?;
     validation::channel(channel)?;
 
+    wifi::require_monitor(&interface)?;
+    state
+        .radios
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(interface.clone());
     let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
     clear_finished(&mut slot);
     if slot.is_some() {
@@ -249,6 +293,12 @@ async fn wps_attack(
     validation::mac(&bssid)?;
     validation::channel(channel)?;
 
+    wifi::require_monitor(&interface)?;
+    state
+        .radios
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(interface.clone());
     let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
     clear_finished(&mut slot);
     if slot.is_some() {
@@ -394,11 +444,83 @@ pub fn stop_sessions(app: &tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+async fn recover_interfaces(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        stop_sessions(&app);
+        restore_radios(&app)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn restore_radios(app: &tauri::AppHandle) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let names: Vec<_> = state
+        .radios
+        .lock()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .cloned()
+        .collect();
+    let mut errors = Vec::new();
+    for name in names {
+        match wifi::stop_monitor(&name) {
+            Ok(_) => {
+                state
+                    .radios
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .remove(&name);
+            }
+            Err(e) => errors.push(format!("{name}: {e}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok("Session radios restored to managed mode.".into())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+#[tauri::command]
+fn set_restore_on_exit(state: State<'_, AppState>, enabled: bool) {
+    state
+        .restore_on_exit
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn shutdown(app: &tauri::AppHandle) {
+    if app
+        .state::<AppState>()
+        .closing
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
     let handle = app.clone();
     std::thread::spawn(move || {
         stop_sessions(&handle);
-        handle.exit(0);
+        let recover = handle
+            .state::<AppState>()
+            .restore_on_exit
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let result = if recover {
+            restore_radios(&handle)
+        } else {
+            handle.state::<AppState>().radios.lock().unwrap().clear();
+            Ok(String::new())
+        };
+        match result {
+            Ok(_) => handle.exit(0),
+            Err(error) => {
+                handle
+                    .state::<AppState>()
+                    .closing
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = handle.emit("recovery-error", error);
+            }
+        }
     });
 }
 
@@ -415,6 +537,9 @@ fn main() {
             std::fs::create_dir_all(&wordlists).ok();
             std::fs::create_dir_all(&rules).ok();
             app.manage(AppState {
+                restore_on_exit: std::sync::atomic::AtomicBool::new(true),
+                closing: std::sync::atomic::AtomicBool::new(false),
+                radios: Mutex::new(std::collections::HashSet::new()),
                 scan: Mutex::new(None),
                 attack: Mutex::new(None),
                 crack: Mutex::new(None),
@@ -426,6 +551,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             platform,
+            preflight::preflight,
+            set_restore_on_exit,
+            recover_interfaces,
             job_running,
             list_interfaces,
             start_monitor,
@@ -467,7 +595,8 @@ fn main() {
                 let state = app.state::<AppState>();
                 let busy = state.scan.lock().map(|s| s.is_some()).unwrap_or(false)
                     || state.attack.lock().map(|s| s.is_some()).unwrap_or(false)
-                    || state.crack.lock().map(|s| s.is_some()).unwrap_or(false);
+                    || state.crack.lock().map(|s| s.is_some()).unwrap_or(false)
+                    || state.radios.lock().map(|s| !s.is_empty()).unwrap_or(false);
                 if busy {
                     api.prevent_exit();
                     shutdown(app);

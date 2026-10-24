@@ -9,6 +9,20 @@ use crate::process::{self, ChildGuard};
 use crate::wifi;
 use tauri::ipc::Channel;
 
+fn forward_lines(
+    rx: std::sync::mpsc::Receiver<String>,
+    done: &std::sync::atomic::AtomicBool,
+    mut send: impl FnMut(String),
+) {
+    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => send(line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        }
+    }
+}
+
 /// Spawn airodump-ng in a worker thread, streaming snapshots and log lines over
 /// `Channel`s. Returns a `(guard, handle)` pair so callers can request a stop.
 pub fn start(
@@ -66,14 +80,16 @@ fn run(
 
     // Forward airodump's terminal output as info logs (handshake notices, etc.).
     let log_chan = logs.clone();
+    let reader_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_done2 = reader_done.clone();
     let log_reader = std::thread::spawn(move || {
-        while let Ok(line) = rx.recv() {
+        forward_lines(rx, &reader_done2, |line| {
             let _ = log_chan.send(LogEvent {
                 level: "info".into(),
                 message: line,
                 timestamp: now(),
             });
-        }
+        });
     });
 
     let mut first_net: HashMap<String, i64> = HashMap::new();
@@ -122,6 +138,8 @@ fn run(
     }
 
     process::reap(&mut child);
+    guard.set_pid(0);
+    reader_done.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = log_reader.join();
 
     // Final snapshot so the UI can show the last seen state and clear "running".
@@ -246,6 +264,25 @@ pub fn parse_clients(text: &str) -> Vec<Client> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn log_reader_stops_even_when_a_descendant_keeps_the_pipe_open() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_done = done.clone();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            super::forward_lines(receiver, &worker_done, |_| {});
+            finished_tx.send(()).unwrap();
+        });
+        sender.send("last line".into()).unwrap();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        worker.join().unwrap();
+        drop(sender);
+    }
+
     use super::*;
 
     #[test]
