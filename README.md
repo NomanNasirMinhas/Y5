@@ -1,5 +1,7 @@
 # Y5
 
+![Y5 — Airwave Audit Console: a retro green CRT banner with wireless signal waves](docs/images/y5-banner.png)
+
 A local-first WiFi security auditing dashboard built with **Tauri v2 + React**. It consolidates the workflows of **wifite** (automation), **kismet** (passive discovery), **airmon-ng** (monitor-mode management) and the **aircrack-ng** suite (deauth, handshake capture, WEP/WPA cracking) into one desktop app — shelling out to a system-installed aircrack-ng suite, the same way RF Radar shells out to its RTL-SDR driver.
 
 > **Authorized testing only.** Deauthentication and cracking disrupt wireless networks and can recover keys. Use Y5 only on networks you own, or where you have explicit written permission to test.
