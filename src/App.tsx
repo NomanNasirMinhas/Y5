@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Wifi,
@@ -9,11 +10,15 @@ import {
   HelpCircle,
   Radio,
   RefreshCw,
+  FileText,
+  Laptop,
   X,
 } from "lucide-react";
 import { native, platform } from "./bridge";
-import { LogEvent } from "./types";
+import { LogEvent, Network as WifiNetwork } from "./types";
 import "./style.css";
+import "./slate.css";
+import { Preflight } from "./Preflight";
 import { Scan } from "./Scan";
 import { Attacks } from "./Attacks";
 import { Crack } from "./Crack";
@@ -38,7 +43,7 @@ const TABS: {
     id: "scan",
     label: "Scan",
     hint: "Discover networks & clients",
-    icon: <Crosshair size={18} />,
+    icon: <Wifi size={18} />,
     eyebrow: "PASSIVE DISCOVERY",
     title: "Discover the airwaves.",
     blurb:
@@ -47,9 +52,9 @@ const TABS: {
   },
   {
     id: "attacks",
-    label: "Attacks",
+    label: "Targets",
     hint: "Deauth · handshake · PMKID · WPS",
-    icon: <Wifi size={18} />,
+    icon: <Crosshair size={18} />,
     eyebrow: "AUTHORIZED TARGETS ONLY",
     title: "Run targeted attacks.",
     blurb:
@@ -58,9 +63,9 @@ const TABS: {
   },
   {
     id: "crack",
-    label: "Crack",
+    label: "Captures",
     hint: "aircrack-ng & hashcat export",
-    icon: <KeyRound size={18} />,
+    icon: <FileText size={18} />,
     eyebrow: "OFFLINE RECOVERY",
     title: "Crack captured keys.",
     blurb:
@@ -71,7 +76,7 @@ const TABS: {
     id: "interfaces",
     label: "Interfaces",
     hint: "Monitor-mode management",
-    icon: <Network size={18} />,
+    icon: <Laptop size={18} />,
     eyebrow: "RADIO SETUP",
     title: "Manage your radios.",
     blurb:
@@ -92,6 +97,13 @@ const TABS: {
 ];
 
 export default function App() {
+  const [recoveryError, setRecoveryError] = useState("");
+  useEffect(() => {
+    if (!native) return;
+    const listener = listen<string>("recovery-error", e => setRecoveryError(e.payload));
+    return () => { void listener.then(stop => stop()); };
+  }, []);
+  const [targets, setTargets] = useState<WifiNetwork[]>([]);
   const [tab, setTab] = useState<Tab>("scan");
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [busyScan, setBusyScan] = useState(false);
@@ -125,97 +137,20 @@ export default function App() {
   return (
     <div className="shell">
       <UpdateDialog busy={busy} />
-      <aside className="sidebar">
-        <a
-          className="brand"
-          href="#"
-          aria-label="Y5 home"
-          onClick={() => setTab("scan")}
-        >
-          <span className="brand-mark">
-            <Wifi size={25} />
-          </span>
-          <span>
-            Y<span className="brand-light">5</span>
-            <small>Airwave Audit Console</small>
-          </span>
-        </a>
-        <div className="nav-caption">WORKSPACE</div>
-        <nav>
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={tab === t.id ? "active" : ""}
-              aria-current={tab === t.id ? "page" : undefined}
-              onClick={() => setTab(t.id)}
-            >
-              {t.icon}
-              <span>
-                {t.label}
-                <small style={{ display: "block", fontSize: 8, color: "var(--muted)", fontWeight: 400 }}>
-                  {t.hint}
-                </small>
-              </span>
-            </button>
-          ))}
-          <button onClick={() => setHelp(true)}>
-            <HelpCircle size={18} />
-            <span>
-              Guide
-              <small style={{ display: "block", fontSize: 8, color: "var(--muted)", fontWeight: 400 }}>
-                Authorized testing
-              </small>
-            </span>
-          </button>
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="receiver-card">
-            <div className="eyebrow">PLATFORM</div>
-            <Radio size={25} />
-            <strong>{!native ? "Simulation source" : os.toUpperCase()}</strong>
-            <span>
-              {linux
-                ? "aircrack-ng suite · injection"
-                : "passive scan + offline crack"}
-            </span>
-            <div className={`connection ${linux ? "online" : ""}`}>
-              <i />
-              {!native ? "Demo mode" : linux ? "Verify radio setup" : "Limited mode"}
-            </div>
-            <button className="text-button" onClick={() => setTab("interfaces")}>
-              <RefreshCw size={12} />
-              Manage interfaces
-            </button>
-          </div>
-          <div className="local">
-            <span />
-            LOCAL PROCESSING <small>v{__APP_VERSION__}</small>
-          </div>
+      <div className="app-topbar">
+        <a className="wordmark" href="#" onClick={() => setTab("scan")} aria-label="Y5 home">Y5</a>
+        <strong>Airwave Audit Console</strong><span className="product-subtitle">Wi-Fi Testing Tool</span>
+        <div className="app-meta"><span>v{__APP_VERSION__}</span><span>{native ? "Local mode" : "Demo mode"}</span>
+          <button className="icon-button" aria-label="Open guide" onClick={() => setHelp(true)}><HelpCircle size={19} /></button>
         </div>
-      </aside>
+      </div>
+      <nav className="top-nav" aria-label="Workspace">
+        {TABS.map(t => <button key={t.id} className={tab === t.id ? "active" : ""} aria-current={tab === t.id ? "page" : undefined} onClick={() => setTab(t.id)}>{t.icon}<span>{t.label}</span></button>)}
+      </nav>
       <main>
-        <header>
-          <div className="breadcrumb">
-            Workspace
-            <ChevronRight size={12} />
-            <span>{current.crumb}</span>
-          </div>
-          <div className="header-right">
-            <span className={`small-status ${linux ? "" : "offline"}`}>
-              <i />
-              {headerStatus}
-            </span>
-            <button
-              className="icon-button"
-              title="Authorized testing guide"
-              onClick={() => setHelp(true)}
-            >
-              <HelpCircle size={18} />
-            </button>
-          </div>
-        </header>
         <div className="page">
-          <div className="title-row">
+          {recoveryError && <div className="error" role="alert"><span>Radio recovery failed: {recoveryError}</span><button onClick={() => { setTab("interfaces"); setRecoveryError(""); }}>Open interfaces</button></div>}
+          <div className="title-row" hidden={tab === "scan"}>
             <div>
               <div className="eyebrow orange">{current.eyebrow}</div>
               <h1>{current.title}</h1>
@@ -227,10 +162,11 @@ export default function App() {
             </div>
           </div>
           <div hidden={tab !== "scan"}>
-            <Scan visible={tab === "scan"} onBusy={setBusyScan} pushLog={pushLog} />
+            <Scan onInterfaces={() => setTab("interfaces")} onTargets={items => { setTargets(items); setTab("attacks"); }} visible={tab === "scan"} onBusy={setBusyScan} pushLog={pushLog} />
+            <Log logs={logs} onClear={() => setLogs([])} compact />
           </div>
           <div hidden={tab !== "attacks"}>
-            <Attacks visible={tab === "attacks"} onBusy={setBusyAttack} pushLog={pushLog} />
+            <Attacks targets={targets} visible={tab === "attacks"} onBusy={setBusyAttack} pushLog={pushLog} />
           </div>
           <div hidden={tab !== "crack"}>
             <Crack

@@ -1,10 +1,4 @@
-/* ============================================================================
-   Y5 — "PHOSPHOR CONSOLE" DESIGN SYSTEM
-   A 1980s CRT security-terminal skin: near-black green glass, phosphor-green
-   primary text, amber warnings, red attack states, cyan info. Retro is the
-   skin; usability is the law — 13px mono body, high contrast, glow only on
-   display type, no flicker (LED blink only, off under reduced motion).
-   ========================================================================== */
+/* Y5: graphite instrument panels, neutral text and restrained amber accents. */
 
 @import "@fontsource/ibm-plex-mono/400.css";
 @import "@fontsource/ibm-plex-mono/500.css";
@@ -13,27 +7,27 @@
 @import "@fontsource/vt323/400.css";
 
 :root {
-  --bg: #050b06;
-  --bg-raised: #0a140c;
-  --panel: #0d1a10;
-  --panel-deep: #030805;
-  --line: #1e3a28;
-  --line-dim: #14261b;
+  --bg: #121316;
+  --bg-raised: #191b20;
+  --panel: #1e2026;
+  --panel-deep: #0e1014;
+  --line: #41454e;
+  --line-dim: #2b2f38;
 
-  --phosphor: #4eff9e;
-  --phosphor-dim: #2c7a4f;
-  --text: #b8e6c9;
-  --muted: #86ae94;
+  --phosphor: #e9b76b;
+  --phosphor-dim: #8c744e;
+  --text: #e5e3df;
+  --muted: #a6a9b2;
   --amber: #ffb347;
   --red: #ff5f56;
   --cyan: #5fd4ff;
-  --ink: #04120a; /* text on phosphor fills */
+  --ink: #16171b; /* text on phosphor fills */
 
   --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
   --font-display: "VT323", var(--font-mono);
 
-  --glow-phosphor: 0 0 10px rgba(78, 255, 158, 0.28);
-  --glow-phosphor-soft: 0 0 22px rgba(78, 255, 158, 0.12);
+  --glow-phosphor: 0 0 10px rgba(233, 183, 107, 0.28);
+  --glow-phosphor-soft: 0 0 22px rgba(233, 183, 107, 0.12);
 }
 
 /* ---- base ------------------------------------------------------------------ */
@@ -245,7 +239,7 @@ footer {
   border: 1px solid var(--phosphor-dim);
   color: var(--phosphor);
   text-shadow: var(--glow-phosphor);
-  box-shadow: inset 0 0 14px rgba(78, 255, 158, 0.12), var(--glow-phosphor-soft);
+  box-shadow: inset 0 0 14px rgba(233, 183, 107, 0.12), var(--glow-phosphor-soft);
 }
 
 .brand > span {
@@ -360,7 +354,7 @@ nav button.active small {
   padding: 14px;
   border: 1px solid var(--line);
   background: var(--panel);
-  box-shadow: inset 0 0 0 1px rgba(78, 255, 158, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(233, 183, 107, 0.05);
 }
 .receiver-card .eyebrow {
   margin-bottom: 10px;
@@ -638,7 +632,7 @@ label {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 2px;
-  box-shadow: inset 0 0 0 1px rgba(78, 255, 158, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(233, 183, 107, 0.05);
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -761,10 +755,10 @@ td:first-child {
 }
 
 tbody tr:hover {
-  background: rgba(78, 255, 158, 0.05);
+  background: rgba(233, 183, 107, 0.05);
 }
 tr.selected td {
-  background: rgba(78, 255, 158, 0.1);
+  background: rgba(233, 183, 107, 0.1);
   border-bottom-color: var(--phosphor-dim);
 }
 
@@ -795,7 +789,7 @@ tr.selected td {
 }
 .badge.wpa2 {
   color: var(--phosphor);
-  border-color: rgba(78, 255, 158, 0.5);
+  border-color: rgba(233, 183, 107, 0.5);
 }
 .badge.wpa {
   color: var(--amber);
@@ -824,7 +818,7 @@ tr.selected td {
   color: var(--phosphor);
   border: 1px solid var(--phosphor-dim);
   border-radius: 2px;
-  background: rgba(78, 255, 158, 0.06);
+  background: rgba(233, 183, 107, 0.06);
 }
 
 /* square LEDs — a round dot would break the TUI illusion */
@@ -894,7 +888,7 @@ footer .status-led.on {
 }
 .signal-bars i.lit {
   background: var(--phosphor);
-  box-shadow: 0 0 6px rgba(78, 255, 158, 0.5);
+  box-shadow: 0 0 6px rgba(233, 183, 107, 0.5);
 }
 .signal-bars span {
   font-size: 10px;
@@ -913,7 +907,7 @@ footer .status-led.on {
   border: 1px solid var(--phosphor-dim);
   border-radius: 2px;
   padding: 6px 12px;
-  background: rgba(78, 255, 158, 0.05);
+  background: rgba(233, 183, 107, 0.05);
 }
 .source-badge span {
   width: 7px;
@@ -1043,7 +1037,7 @@ footer .status-led.on {
   padding: 16px;
   border: 1px solid var(--phosphor);
   border-radius: 2px;
-  background: rgba(78, 255, 158, 0.07);
+  background: rgba(233, 183, 107, 0.07);
   box-shadow: var(--glow-phosphor-soft);
   text-align: center;
 }
@@ -1101,7 +1095,7 @@ footer .status-led.on {
   border: 1px solid var(--line);
   border-radius: 2px;
   background: var(--panel-deep);
-  box-shadow: inset 0 0 0 1px rgba(78, 255, 158, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(233, 183, 107, 0.05);
 }
 .readout small {
   display: block;
@@ -1181,7 +1175,7 @@ footer .status-led.on {
 }
 .interface-card.selected {
   border-color: var(--phosphor);
-  background: rgba(78, 255, 158, 0.06);
+  background: rgba(233, 183, 107, 0.06);
   box-shadow: inset 3px 0 0 var(--phosphor);
 }
 .interface-icon {
@@ -1391,3 +1385,13 @@ nav button small { font-size: 10px !important; }
   .update-actions { flex-wrap: wrap; }
 }
 
+
+/* Neutral instrument palette: color communicates actions, not every surface. */
+body::before, body::after { display: none; }
+.preflight { padding: 12px 16px; margin-bottom: 22px; }
+.preflight summary { cursor: pointer; }
+.preflight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; padding: 16px 0; }
+.preflight-grid small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.selection-bar { flex-wrap: wrap; }
+.selected-network { background: rgba(233,183,107,.08); }
+input[type="radio"], input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--amber); }

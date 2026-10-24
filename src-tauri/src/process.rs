@@ -1,9 +1,8 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 /// Shared handle to a spawned child, usable from any thread to request a graceful stop.
@@ -112,6 +111,65 @@ pub fn run(program: &str, args: &[&str]) -> Result<Output, std::io::Error> {
         .args(args)
         .stdin(Stdio::null())
         .output()
+}
+
+/// Radio setup and discovery commands must not block the UI indefinitely.
+pub fn run_bounded(program: &str, args: &[&str]) -> Result<Output, std::io::Error> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (is_stdout, mut stream) in [
+        (true, Box::new(stdout) as Box<dyn Read + Send>),
+        (false, Box::new(stderr) as Box<dyn Read + Send>),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stream.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = tx.send((is_stdout, result));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{program} did not finish within 15 seconds"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    for _ in 0..2 {
+        let (is_stdout, bytes) = rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Tool output pipe did not close",
+            )
+        })?;
+        if is_stdout {
+            output.stdout = bytes?;
+        } else {
+            output.stderr = bytes?;
+        }
+    }
+    Ok(output)
 }
 
 /// Locate a binary on `PATH`, returning `None` when absent.

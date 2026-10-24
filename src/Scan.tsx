@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from "react";
-import { Wifi, Play, Square, Radio, Search, Info } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { Wifi, Play, Square, Radio, Search, Info, ArrowRight } from "lucide-react";
 import { listInterfaces, startScan, stopScan, platform, native } from "./bridge";
+import { Preflight } from "./Preflight";
 import { useJobCompletion } from "./useJobCompletion";
 import {
+  Network,
   WirelessInterface,
   ScanSnapshot,
   LogEvent,
@@ -26,12 +28,17 @@ export function Scan({
   onBusy,
   pushLog,
   visible = true,
+  onTargets,
+  onInterfaces,
 }: {
   visible?: boolean;
+  onInterfaces?: () => void;
+  onTargets?: (networks: Network[]) => void;
   onBusy: (v: boolean) => void;
   pushLog: (e: LogEvent) => void;
 }) {
   const [ifaces, setIfaces] = useState<WirelessInterface[]>([]);
+  const generation = useRef(0);
   const [iface, setIface] = useState("");
   const [channel, setChannel] = useState<number | null>(null);
   const [snapshot, setSnapshot] = useState<ScanSnapshot>(initialSnapshot);
@@ -40,6 +47,11 @@ export function Scan({
   const [error, setError] = useState("");
   const [os, setOs] = useState("");
   const [clock, setClock] = useState(Date.now());
+  const [selection, setSelection] = useState<string[]>([]);
+  const [multiple, setMultiple] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [endedAt, setEndedAt] = useState<number | null>(null);
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -67,6 +79,7 @@ export function Scan({
   const linux = os === "linux" || !native;
   useJobCompletion("scan", scanning && !pending, () => {
     setScanning(false);
+    setEndedAt(Date.now());
     onBusy(false);
     setSnapshot((s) => ({ ...s, running: false, message: "Scan finished. Review the log for details." }));
   }, setError);
@@ -78,6 +91,10 @@ export function Scan({
       return;
     }
     setError("");
+    const session = ++generation.current;
+    setSelection([]);
+    setStartedAt(Date.now());
+    setEndedAt(null);
     setSnapshot({ ...initialSnapshot, interface: iface, running: true, message: "Starting scan…" });
     setPending(true);
     setScanning(true);
@@ -87,8 +104,10 @@ export function Scan({
         iface,
         channel,
         (s) => {
+          if (session !== generation.current) return;
           setSnapshot(s);
           setScanning(s.running);
+          if (!s.running) setEndedAt(Date.now());
           onBusy(s.running);
         },
         pushLog,
@@ -104,8 +123,11 @@ export function Scan({
   async function stop() {
     if (pending) return;
     setPending(true);
+    setStopping(true);
     try {
       await stopScan();
+      generation.current++;
+      setEndedAt(Date.now());
       setScanning(false);
       onBusy(false);
       setSnapshot((p) => ({ ...p, running: false, message: "Scan stopped" }));
@@ -113,9 +135,11 @@ export function Scan({
       setError(String(e));
     } finally {
       setPending(false);
+      setStopping(false);
     }
   }
 
+  const selectedNetworks = snapshot.networks.filter(n => selection.includes(n.bssid));
   const nets = snapshot.networks.filter((n) =>
     `${n.essid} ${n.bssid}`.toLowerCase().includes(query.toLowerCase()),
   );
@@ -126,260 +150,52 @@ export function Scan({
   ).length;
   const running = scanning;
 
-  return (
-    <>
-      {!linux && (
-        <div className="notice warn">
-          <Info size={15} />
-          <span>
-            Live scanning needs a Linux system with a compatible wireless
-            chipset (Atheros, Ralink or Realtek). On {os.toUpperCase()} you can
-            still crack existing captures in the Crack tab.
-          </span>
-        </div>
-      )}
-      <section className="toolbar">
-        <div className="control">
-          <label htmlFor="scan-iface">INTERFACE</label>
-          <select
-            id="scan-iface"
-            disabled={scanning}
-            value={iface}
-            onChange={(e) => setIface(e.target.value)}
-          >
-            {ifaces.length ? (
-              ifaces.map((i) => (
-                <option key={i.name} value={i.name}>
-                  {i.name}
-                  {i.interfaceType === "monitor" ? " (monitor)" : ""}
-                </option>
-              ))
-            ) : (
-              <option value="">No interfaces</option>
-            )}
-          </select>
-        </div>
-        <div className="control">
-          <label htmlFor="scan-channel">CHANNEL</label>
-          <select
-            id="scan-channel"
-            disabled={scanning}
-            value={channel === null ? "null" : String(channel)}
-            onChange={(e) =>
-              setChannel(e.target.value === "null" ? null : +e.target.value)
-            }
-          >
-            {CHANNELS.map((c) => (
-              <option
-                key={c.value ?? "auto"}
-                value={c.value === null ? "null" : String(c.value)}
-              >
-                {c.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button
-          className="primary"
-          disabled={pending || (!running && (!iface || !linux))}
-          onClick={() => (running ? stop() : start())}
-        >
-          {running ? <Square size={16} /> : <Play size={16} />}{" "}
-          {running ? "Stop scan" : "Start scan"}
+  const seconds = startedAt ? Math.max(0, Math.floor(((endedAt ?? clock) - startedAt) / 1000)) : 0;
+  const duration = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map(n => String(n).padStart(2, "0")).join(":");
+  const toggle = (bssid: string) => setSelection(p => multiple ? p.includes(bssid) ? p.filter(b => b !== bssid) : [...p, bssid] : [bssid]);
+  return <>
+    <section className="discovery-hero panel">
+      <div><h1>Network Discovery</h1><p>Scan for nearby Wi-Fi networks and select targets for further analysis.</p></div>
+      <div className="scan-actions">
+        <div className="interface-picker"><Radio size={22} /><select aria-label="Scan interface" disabled={scanning || pending} value={iface} onChange={e => setIface(e.target.value)}>
+          {ifaces.length ? ifaces.map(i => <option key={i.name} value={i.name}>{i.name}{i.interfaceType === "monitor" ? " (monitor)" : " (managed)"}</option>) : <option value="">No interfaces</option>}
+        </select></div>
+        <button className={running ? "scan-stop" : "primary"} disabled={pending || (!running && (!iface || !linux))} onClick={() => running ? stop() : start()}>
+          {running ? <Square size={17} fill="currentColor" /> : <Play size={17} />} {stopping ? "Stopping…" : pending ? "Starting…" : running ? "Stop scan" : "Start scan"}
         </button>
-      </section>
-      {error && (
-        <div className="error" role="alert">
-          <Info size={16} />
-          <span>{error}</span>
-          <button aria-label="Dismiss error" onClick={() => setError("")}>
-            ✕
-          </button>
-        </div>
-      )}
-      <section className="stats">
-        <div>
-          <span>NETWORKS</span>
-          <strong>
-            {String(snapshot.networks.length).padStart(2, "0")}
-            <small>{seen} seen in last 15s</small>
-          </strong>
-        </div>
-        <div>
-          <span>CLIENTS</span>
-          <strong>
-            {String(snapshot.clients.length).padStart(2, "0")}
-            <small>Associated stations</small>
-          </strong>
-        </div>
-        <div>
-          <span>CHANNEL</span>
-          <strong>
-            {snapshot.channel || "—"}
-            <em>chan</em>
-          </strong>
-        </div>
-        <div>
-          <span>INTERFACE</span>
-          <strong>
-            <small style={{ marginLeft: 0 }}>{snapshot.interface || "—"}</small>
-          </strong>
-        </div>
-      </section>
-      <div className="notice" role="status">{snapshot.message}</div>
-      <div className="split-grid">
-        <section className="panel">
-          <div className="panel-heading">
-            <h2>
-              <Wifi size={16} />
-              Networks
-              <span className="count">{nets.length}</span>
-            </h2>
-            <div className="search">
-              <Search size={13} />
-              <input
-                aria-label="Filter networks"
-                placeholder="Search…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>NETWORK</th>
-                  <th>CHANNEL</th>
-                  <th>ENCRYPTION</th>
-                  <th>POWER</th>
-                  <th>CLIENTS</th>
-                  <th>LAST SEEN</th>
-                </tr>
-              </thead>
-              <tbody>
-                {nets.map((n) => {
-                  const enc = encryption(n.privacy);
-                  const bars = Math.round(signalStrength(n.power) * 5);
-                  return (
-                    <tr key={n.bssid}>
-                      <td>
-                        <strong style={{ fontWeight: 500 }}>{n.essid}</strong>
-                        <small className="mono" style={{ display: "block", color: "var(--muted)", marginTop: 3 }}>
-                          {n.bssid}
-                        </small>
-                      </td>
-                      <td className="mono">{n.channel}</td>
-                      <td>
-                        <span className={`badge ${enc.kind}`}>{enc.label}</span>
-                        {n.wps && (
-                          <span className="badge wpa" style={{ marginLeft: 4 }}>
-                            WPS
-                          </span>
-                        )}
-                      </td>
-                      <td>
-                        <div className="signal-bars">
-                          {[1, 2, 3, 4, 5].map((i) => (
-                            <i
-                              key={i}
-                              className={i <= bars ? "lit" : ""}
-                              style={{ height: 4 + i * 2 }}
-                            />
-                          ))}
-                          <span>{n.power} dBm</span>
-                        </div>
-                      </td>
-                      <td className="mono">{clientsFor(n.bssid)}</td>
-                      <td className="last-seen">{age(n.lastSeen, clock)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {!nets.length && (
-              <div className="empty">
-                <Wifi size={33} />
-                <strong>
-                  {running
-                    ? "Listening for networks…"
-                    : query
-                      ? "No matching networks"
-                      : "No networks detected yet."}
-                </strong>
-                <p>
-                  {running
-                    ? "Access points within range will appear here as they beacon."
-                    : "Start a scan to discover networks, or explore the synthetic demo in the browser."}
-                </p>
-              </div>
-            )}
-          </div>
-          <div className="panel-footer">
-            <Info size={12} />
-            ESSIDs and MACs are broadcast by access points in range. Only survey
-            networks you are authorized to test.
-          </div>
-        </section>
-        <section className="panel">
-          <div className="panel-heading">
-            <h2>
-              <Radio size={16} />
-              Clients
-              <span className="count">{snapshot.clients.length}</span>
-            </h2>
-            <span className={`live-label ${running ? "on" : ""}`}>
-              <i />
-              {running ? "SURVEYING" : "STANDBY"}
-            </span>
-          </div>
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>STATION MAC</th>
-                  <th>POWER</th>
-                  <th>PACKETS</th>
-                  <th>BSSID</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapshot.clients.map((c) => (
-                  <tr key={c.mac}>
-                    <td>
-                      <span className="mono">{c.mac}</span>
-                      {c.probedEssids && (
-                        <small
-                          style={{ display: "block", color: "var(--muted)", marginTop: 3 }}
-                        >
-                          probes: {c.probedEssids}
-                        </small>
-                      )}
-                    </td>
-                    <td className="mono">{c.power} dBm</td>
-                    <td className="mono">{c.packets}</td>
-                    <td className="mono">{c.bssid}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!snapshot.clients.length && (
-              <div className="empty">
-                <Radio size={30} />
-                <strong>No clients seen.</strong>
-                <p>
-                  Stations appear once they transmit. Probe requests and data
-                  frames reveal client MACs.
-                </p>
-              </div>
-            )}
-          </div>
-          <div className="panel-footer">
-            <Info size={12} />
-            Client MACs are observed, not identified. No device is named.
-          </div>
-        </section>
+        <div className="scan-duration"><span>Scan duration</span><strong>{duration}</strong></div>
       </div>
-    </>
-  );
+    </section>
+    {error && <div className="error" role="alert"><Info size={16}/><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError("")}>Dismiss</button></div>}
+    {!linux && <div className="notice warn">Live scanning requires Linux with a compatible wireless adapter.</div>}
+    <div className="discovery-layout">
+      <section className="panel networks-panel">
+        <div className="panel-heading">
+          <h2>Discovered Networks ({nets.length})</h2>
+          <div className="network-filters"><div className="search"><Search size={16}/><input aria-label="Filter networks" placeholder="Filter networks…" value={query} onChange={e => setQuery(e.target.value)}/></div>
+          <select aria-label="Scan channel" disabled={scanning || pending} value={channel ?? "all"} onChange={e => setChannel(e.target.value === "all" ? null : +e.target.value)}>{CHANNELS.map(c => <option key={c.value ?? "all"} value={c.value ?? "all"}>{c.value === null ? "All channels" : c.label}</option>)}</select></div>
+        </div>
+        <div className="table-scroll network-table"><table>
+          <thead><tr><th><input aria-label="Select all visible networks" type="checkbox" disabled={!multiple || !nets.length} checked={nets.length > 0 && nets.every(n => selection.includes(n.bssid))} onChange={e => setSelection(p => e.target.checked ? [...new Set([...p, ...nets.map(n => n.bssid)])] : p.filter(b => !nets.some(n => n.bssid === b)))}/></th><th>SSID</th><th>BSSID (MAC)</th><th>Channel</th><th>Signal (dBm)</th><th>Encryption</th><th>Clients</th><th>Last seen</th></tr></thead>
+          <tbody>{nets.map(n => <tr key={n.bssid} className={selection.includes(n.bssid) ? "selected-network" : ""}>
+            <td><input aria-label={`Select ${n.essid || n.bssid}`} type={multiple ? "checkbox" : "radio"} name="network-selection" checked={selection.includes(n.bssid)} onChange={() => toggle(n.bssid)}/></td>
+            <td className="network-name">{n.essid || "Hidden Network"}</td><td className="mono">{n.bssid}</td><td>{n.channel}</td><td className={n.power > -60 ? "signal-good" : "signal-fair"}>{n.power}</td><td>{encryption(n.privacy).label}{n.wps ? " · WPS" : ""}</td><td>{clientsFor(n.bssid)}</td><td className="last-seen">{age(n.lastSeen, clock)}</td>
+          </tr>)}</tbody>
+        </table></div>
+        <div className="network-cards">{nets.map(n => <label className={`network-card ${selection.includes(n.bssid) ? "selected-network" : ""}`} key={n.bssid}>
+          <input aria-label={`Select mobile ${n.essid || n.bssid}`} type={multiple ? "checkbox" : "radio"} name="mobile-network-selection" checked={selection.includes(n.bssid)} onChange={() => toggle(n.bssid)}/>
+          <span><strong>{n.essid || "Hidden Network"}</strong><small>{n.bssid} · CH {n.channel}</small><small>{encryption(n.privacy).label} · {clientsFor(n.bssid)} clients</small></span><span className="signal-good">{n.power} dBm</span>
+        </label>)}</div>
+        {!nets.length && <div className="empty"><Wifi size={30}/><strong>{running ? "Listening for networks…" : query ? "No matching networks" : "No networks detected yet."}</strong><p>{running ? "Access points appear as they transmit." : "Start a scan to discover nearby networks."}</p></div>}
+        <div className="selection-footer"><span>{selectedNetworks.length} of {snapshot.networks.length} networks selected</span>
+          <select aria-label="Selection" value={multiple ? "multiple" : "single"} onChange={e => {setMultiple(e.target.value === "multiple"); setSelection(p => p.slice(0,1));}}><option value="single">Single network</option><option value="multiple">Multiple networks</option></select>
+          <button className="secondary" disabled={!selection.length} onClick={() => setSelection([])}>Clear selection</button>
+          <button className="primary" disabled={!selectedNetworks.length || scanning || pending} onClick={() => onTargets?.(selectedNetworks)}>Review selected targets <ArrowRight size={16}/></button>
+        </div>
+        <div className="scan-status" role="status">{snapshot.message}{scanning && selectedNetworks.length > 0 ? " · Stop the scan to review targets." : ""}</div>
+      </section>
+      <Preflight interfaceName={iface} onInterfaces={onInterfaces}/>
+    </div>
+    {snapshot.clients.length > 0 && <details className="client-disclosure"><summary>Observed clients ({snapshot.clients.length})</summary><div className="table-scroll"><table><thead><tr><th>Station MAC</th><th>Signal</th><th>Packets</th><th>BSSID</th></tr></thead><tbody>{snapshot.clients.map(c => <tr key={c.mac}><td>{c.mac}</td><td>{c.power} dBm</td><td>{c.packets}</td><td>{c.bssid}</td></tr>)}</tbody></table></div></details>}
+  </>;
 }
