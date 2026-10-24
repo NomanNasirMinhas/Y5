@@ -252,78 +252,57 @@ fn parse_netsh(text: &str) -> Vec<WirelessInterface> {
     out
 }
 
-/// Start monitor mode for `interface`, returning the monitor interface name.
-pub fn start_monitor(interface: &str) -> Result<String, String> {
-    if list_interfaces()?
-        .iter()
-        .any(|i| i.name == interface && i.interface_type == "monitor")
+fn set_mode(interface: &str, mode: &str) -> Result<String, String> {
+    if platform() != Platform::Linux {
+        return Err("Radio mode changes require Linux.".into());
+    }
+    crate::validation::interface(interface)?;
+    require("iw")?;
+    require("ip")?;
+    let info =
+        process::run_bounded("iw", &["dev", interface, "info"]).map_err(|e| e.to_string())?;
+    if !info.status.success() {
+        return Err(combined(&info));
+    }
+    if String::from_utf8_lossy(&info.stdout)
+        .lines()
+        .any(|line| line.trim() == format!("type {mode}"))
     {
         return Ok(interface.into());
     }
-    if platform() != Platform::Linux {
-        return Err("Monitor mode requires Linux with a compatible wireless chipset.".into());
+    let down = process::run_bounded("ip", &["link", "set", interface, "down"])
+        .map_err(|e| e.to_string())?;
+    if !down.status.success() {
+        return Err(combined(&down));
     }
-    require("airmon-ng")?;
-    let out =
-        process::run_bounded("airmon-ng", &["start", interface]).map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(combined(&out));
+    let change = process::run_bounded("iw", &["dev", interface, "set", "type", mode]);
+    // Bring the device back up even if the mode change fails.
+    let up = process::run_bounded("ip", &["link", "set", interface, "up"]);
+    let change = change.map_err(|e| e.to_string())?;
+    if !change.status.success() {
+        return Err(combined(&change));
     }
-    // Match this radio, never another adapter that was already in monitor mode.
-    let ifaces = list_linux()?;
-    ifaces
-        .iter()
-        .find(|i| {
-            i.interface_type == "monitor"
-                && (i.name == interface || i.name == format!("{interface}mon"))
-        })
-        .map(|i| i.name.clone())
-        .ok_or_else(|| "airmon-ng completed but no monitor interface appeared.".into())
+    let up = up.map_err(|e| e.to_string())?;
+    if !up.status.success() {
+        return Err(combined(&up));
+    }
+    let check =
+        process::run_bounded("iw", &["dev", interface, "info"]).map_err(|e| e.to_string())?;
+    if !check.status.success()
+        || !String::from_utf8_lossy(&check.stdout)
+            .lines()
+            .any(|line| line.trim() == format!("type {mode}"))
+    {
+        return Err(format!("Could not verify {mode} mode on {interface}. Check driver and network-service conflicts."));
+    }
+    Ok(interface.into())
 }
 
+pub fn start_monitor(interface: &str) -> Result<String, String> {
+    set_mode(interface, "monitor")
+}
 pub fn stop_monitor(interface: &str) -> Result<String, String> {
-    if platform() != Platform::Linux {
-        return Err("Monitor mode requires Linux.".into());
-    }
-    if list_interfaces()?
-        .iter()
-        .any(|i| i.name == interface && i.interface_type == "managed")
-    {
-        return Ok(format!("{interface} is already in managed mode."));
-    }
-    require("airmon-ng")?;
-    let out = process::run_bounded("airmon-ng", &["stop", interface]).map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(combined(&out));
-    }
-    let after = list_interfaces()?;
-    if after
-        .iter()
-        .any(|i| i.name == interface && i.interface_type == "monitor")
-    {
-        require("ip")?;
-        require("iw")?;
-        for (program, args) in [
-            ("ip", vec!["link", "set", interface, "down"]),
-            ("iw", vec!["dev", interface, "set", "type", "managed"]),
-            ("ip", vec!["link", "set", interface, "up"]),
-        ] {
-            let result = process::run_bounded(program, &args).map_err(|e| e.to_string())?;
-            if !result.status.success() {
-                return Err(combined(&result));
-            }
-        }
-    }
-    let base = interface.strip_suffix("mon").unwrap_or(interface);
-    if !list_interfaces()?
-        .iter()
-        .any(|i| (i.name == interface || i.name == base) && i.interface_type == "managed")
-    {
-        return Err(format!(
-            "Could not verify managed mode for {interface}. Refresh Interfaces."
-        ));
-    }
-    Ok(combined(&out))
+    set_mode(interface, "managed").map(|name| format!("{name}: managed mode"))
 }
 
 /// Kill interfering processes (NetworkManager, wpa_supplicant, …) that block monitor mode.
@@ -334,19 +313,6 @@ pub fn check_kill() -> Result<String, String> {
     require("airmon-ng")?;
     let out = process::run_bounded("airmon-ng", &["check", "kill"]).map_err(|e| e.to_string())?;
     Ok(combined(&out))
-}
-
-pub fn require_monitor(interface: &str) -> Result<(), String> {
-    let interfaces = list_interfaces()?;
-    match interfaces.iter().find(|i| i.name == interface) {
-        Some(i) if i.interface_type == "monitor" => Ok(()),
-        Some(_) => Err(format!(
-            "{interface} is not in monitor mode. Enable monitor mode in Interfaces first."
-        )),
-        None => Err(format!(
-            "{interface} is unavailable. Refresh Interfaces and check USB passthrough."
-        )),
-    }
 }
 
 pub fn require(program: &str) -> Result<(), String> {
@@ -374,6 +340,19 @@ fn combined(out: &std::process::Output) -> String {
         s.push_str(&e);
     }
     s
+}
+
+pub fn set_channel(interface: &str, channel: i32) -> Result<(), String> {
+    let result = process::run_bounded(
+        "iw",
+        &["dev", interface, "set", "channel", &channel.to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(combined(&result))
+    }
 }
 
 #[cfg(test)]

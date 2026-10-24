@@ -51,6 +51,14 @@ export async function checkKill(): Promise<string> {
   return invoke("check_kill");
 }
 
+async function waitForRadioIdle(kind: "scan" | "attack") {
+  const deadline = Date.now() + 45000;
+  while (await invoke<boolean>("job_running", { kind })) {
+    if (Date.now() > deadline) throw new Error("Radio cleanup is still running. Check the activity log and retry Stop.");
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+}
+
 // --- Scan -------------------------------------------------------------------
 
 export async function startScan(
@@ -61,7 +69,10 @@ export async function startScan(
 ) {
   if (native) {
     const snapshots = new Channel<ScanSnapshot>();
-    snapshots.onmessage = onSnapshot;
+    snapshots.onmessage = s => {
+      if (s.running) onSnapshot(s);
+      else void waitForRadioIdle("scan").then(() => onSnapshot(s)).catch(e => onLog({level:"error",message:String(e),timestamp:Date.now()}));
+    };
     const logs = new Channel<LogEvent>();
     logs.onmessage = onLog;
     await invoke("start_scan", {
@@ -76,7 +87,7 @@ export async function startScan(
 }
 
 export async function stopScan() {
-  if (native) return invoke("stop_scan");
+  if (native) { await invoke("stop_scan"); await waitForRadioIdle("scan"); return; }
   if (demoTimer) clearInterval(demoTimer);
   demoTimer = undefined;
 }
@@ -99,11 +110,13 @@ export async function deauth(
   client: string | null,
   count: number,
   onLog: (e: LogEvent) => void,
+  channel: number,
 ) {
   if (!native) throw injectionError();
   await invoke("deauth", {
     interface: iface,
     bssid,
+    channel,
     client,
     count,
     logs: logChannel(onLog),
@@ -114,11 +127,13 @@ export async function startDeauth(
   bssid: string,
   client: string | null,
   onLog: (e: LogEvent) => void,
+  channel: number,
 ) {
   if (!native) throw injectionError();
   await invoke("start_deauth", {
     interface: iface,
     bssid,
+    channel,
     client,
     logs: logChannel(onLog),
   });
@@ -168,6 +183,7 @@ export async function wpsAttack(
 export async function stopAttack() {
   if (!native) return;
   await invoke("stop_attack");
+  await waitForRadioIdle("attack");
 }
 
 // --- Crack ------------------------------------------------------------------

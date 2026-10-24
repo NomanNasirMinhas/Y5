@@ -40,6 +40,7 @@ export function Attacks({
   const [active, setActive] = useState<AttackKind>(null);
   const [bursting, setBursting] = useState(false);
   const [pending, setPending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [log, setLog] = useState<LogEvent[]>([]);
   const [os, setOs] = useState("");
@@ -72,10 +73,14 @@ export function Attacks({
   const linux = os === "linux" || !native;
   useJobCompletion("attack", active !== null && !pending, () => {
     setActive(null);
+    void listInterfaces().then(setIfaces).catch(e => setError(String(e)));
     onBusy(false);
     onLog({ level: "info", message: "Worker finished. Review the output for the result.", timestamp: Date.now() });
   }, setError);
   const onLog = (e: LogEvent) => {
+    if (e.message.endsWith(": monitor mode ready") || e.message.endsWith(": managed mode restored")) {
+      void listInterfaces().then(setIfaces).catch(error => setError(String(error)));
+    }
     setLog((p) => [...p, e].slice(-300));
     pushLog(e);
   };
@@ -94,12 +99,14 @@ export function Attacks({
         client.trim() || null,
         Math.max(1, +count || 1),
         onLog,
+        +channel,
       );
+      setActive("deauth");
     } catch (e) {
       setError(String(e));
+      onBusy(false);
     } finally {
       setBursting(false);
-      onBusy(false);
     }
   }
 
@@ -112,7 +119,7 @@ export function Attacks({
     onBusy(true);
     try {
       if (kind === "deauth") {
-        await startDeauth(iface, bssid.trim(), client.trim() || null, onLog);
+        await startDeauth(iface, bssid.trim(), client.trim() || null, onLog, +channel);
       } else if (kind === "handshake") {
         await captureHandshake(iface, bssid.trim(), +channel || 1, onLog);
       } else if (kind === "pmkid") {
@@ -133,8 +140,10 @@ export function Attacks({
   async function halt() {
     if (pending) return;
     setPending(true);
+    setStopping(true);
     try {
       await stopAttack();
+      void listInterfaces().then(setIfaces).catch(e => setError(String(e)));
       setActive(null);
       onBusy(false);
       onLog({ level: "warn", message: "Attack stopped.", timestamp: Date.now() });
@@ -142,6 +151,7 @@ export function Attacks({
       setError(String(e));
     } finally {
       setPending(false);
+      setStopping(false);
     }
   }
 
@@ -150,6 +160,7 @@ export function Attacks({
 
   return (
     <>
+      {(pending || bursting) && <div className="notice" role="status">{stopping ? "Stopping tools and restoring managed mode…" : "Preparing the selected interface…"}</div>}
       {!native && <div className="notice">Browser preview: live operations require the desktop app on Linux.</div>}
       {!linux && (
         <div className="notice warn">
@@ -186,7 +197,7 @@ export function Attacks({
           </div>
           <div className="form-row">
             <div className="field">
-              <label htmlFor="atk-iface">MONITOR INTERFACE</label>
+              <label htmlFor="atk-iface">INTERFACE</label>
               <select
                 id="atk-iface"
                 disabled={running || bursting}

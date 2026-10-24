@@ -33,29 +33,6 @@ fn linux_tool(tool: &str) -> Result<(), String> {
     wifi::require(tool)
 }
 
-/// Run a tool to completion, forwarding every output line to `logs`.
-fn run_logged(program: &str, args: &[String], logs: &Channel<LogEvent>) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    let mut child = process::spawn_logged(program, args, tx).map_err(|e| e.to_string())?;
-    let log_chan = logs.clone();
-    let reader = std::thread::spawn(move || {
-        while let Ok(line) = rx.recv() {
-            let _ = log_chan.send(LogEvent {
-                level: "info".into(),
-                message: line,
-                timestamp: now(),
-            });
-        }
-    });
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let _ = reader.join();
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} exited with {status}"))
-    }
-}
-
 fn deauth_args(interface: &str, bssid: &str, client: Option<&str>, count: u32) -> Vec<String> {
     let mut args = vec![
         "--deauth".to_string(),
@@ -71,37 +48,19 @@ fn deauth_args(interface: &str, bssid: &str, client: Option<&str>, count: u32) -
     args
 }
 
-/// Run a bounded deauth burst to completion, returning the combined output.
-pub fn deauth_once(
-    interface: &str,
-    bssid: &str,
-    client: Option<&str>,
-    count: u32,
-    logs: &Channel<LogEvent>,
-) -> Result<(), String> {
-    linux_tool("aireplay-ng")?;
-    if count == 0 {
-        return Err("Use continuous deauth for an unbounded attack.".into());
-    }
-    run_logged(
-        "aireplay-ng",
-        &deauth_args(interface, bssid, client, count),
-        logs,
-    )
-}
-
 /// Start a continuous deauth (count 0) in a worker thread, stoppable via the guard.
-pub fn deauth_loop(
+pub fn deauth_job(
     interface: String,
     bssid: String,
     client: Option<String>,
+    count: u32,
     logs: Channel<LogEvent>,
 ) -> Result<(Arc<ChildGuard>, JoinHandle<()>), String> {
     linux_tool("aireplay-ng")?;
     let guard = ChildGuard::new();
     let guard2 = guard.clone();
     let handle = std::thread::spawn(move || {
-        let args = deauth_args(&interface, &bssid, client.as_deref(), 0);
+        let args = deauth_args(&interface, &bssid, client.as_deref(), count);
         report_result(
             run_until_stopped("aireplay-ng", &args, &logs, guard2),
             &logs,
@@ -120,29 +79,49 @@ fn run_until_stopped(
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let mut child = process::spawn_logged(program, args, tx).map_err(|e| e.to_string())?;
     guard.set_pid(child.id());
-    let log_chan = logs.clone();
-    let reader = std::thread::spawn(move || {
-        while let Ok(line) = rx.recv() {
-            let _ = log_chan.send(LogEvent {
-                level: "info".into(),
-                message: line,
-                timestamp: now(),
-            });
+    let result = loop {
+        if guard.stop_requested() {
+            break Ok(());
         }
-    });
-    while !guard.stop_requested() {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            let _ = reader.join();
-            if !status.success() {
-                return Err(format!("{program} exited with {status}"));
-            }
-            return Ok(());
+            break if status.success() {
+                Ok(())
+            } else {
+                Err(format!("{program} exited with {status}"))
+            };
         }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) => {
+                let _ = logs.send(LogEvent {
+                    level: "info".into(),
+                    message: line,
+                    timestamp: now(),
+                });
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
     process::reap(&mut child);
-    let _ = reader.join();
-    Ok(())
+    guard.set_pid(0);
+    // Preserve trailing results without waiting indefinitely for inherited pipes.
+    if !guard.stop_requested() {
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(line) => {
+                    let _ = logs.send(LogEvent {
+                        level: "info".into(),
+                        message: line,
+                        timestamp: now(),
+                    });
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    result
 }
 
 /// Capture a WPA handshake: targeted airodump plus periodic deauth bursts.
@@ -196,8 +175,15 @@ fn run_handshake(
     let handshake = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hs = handshake.clone();
     let log_chan = logs.clone();
+    let reader_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_done2 = reader_done.clone();
     let reader = std::thread::spawn(move || {
-        while let Ok(line) = rx.recv() {
+        while !reader_done2.load(std::sync::atomic::Ordering::Relaxed) {
+            let line = match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(line) => line,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
             if line.contains("WPA handshake") {
                 hs.store(true, std::sync::atomic::Ordering::SeqCst);
             }
@@ -216,12 +202,27 @@ fn run_handshake(
         && attempts < 40
     {
         // Kick a client to force a reconnection that exposes the handshake.
-        let _ = deauth_once(&interface, &bssid, None, 5, &logs);
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        let _ = run_until_stopped(
+            "aireplay-ng",
+            &deauth_args(&interface, &bssid, None, 5),
+            &logs,
+            guard.clone(),
+        );
         attempts += 1;
-        std::thread::sleep(Duration::from_secs(3));
+        for _ in 0..30 {
+            if guard.stop_requested() || handshake.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     process::reap(&mut child);
+    guard.set_pid(0);
+    reader_done.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = reader.join();
 
     let captured = handshake.load(std::sync::atomic::Ordering::SeqCst);
@@ -270,11 +271,15 @@ pub fn capture_pmkid(
             bssid,
         ];
         report_result(
-            run_until_stopped("hcxdumptool", &args, &logs, guard2),
+            run_until_stopped("hcxdumptool", &args, &logs, guard2.clone()),
             &logs,
         );
+        // Keep stop responsive; captures can be exported later from Captures.
+        if guard2.stop_requested() {
+            return;
+        }
         // Convert to hashcat format if possible.
-        if let Ok(out) = process::run(
+        if let Ok(out) = process::run_bounded(
             "hcxpcapngtool",
             &["-o", &format!("{prefix}.22000"), &pcapng],
         ) {
@@ -330,4 +335,37 @@ pub fn wps_attack(
         report_result(run_until_stopped(tool, &args, &logs, guard2), &logs);
     });
     Ok((guard, handle))
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn silent_attack_process_can_be_cancelled_without_waiting_for_output() {
+        let guard = ChildGuard::new();
+        let worker_guard = guard.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            let (program, args) = (
+                "powershell.exe",
+                vec![
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                    "Start-Sleep -Seconds 30".into(),
+                ],
+            );
+            #[cfg(not(target_os = "windows"))]
+            let (program, args) = ("sleep", vec!["30".into()]);
+            let logs = Channel::new(|_| Ok(()));
+            let result = run_until_stopped(program, &args, &logs, worker_guard);
+            tx.send(result).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        guard.request_stop();
+        rx.recv_timeout(Duration::from_secs(4))
+            .expect("Stop waited for silent output")
+            .unwrap();
+        worker.join().unwrap();
+    }
 }

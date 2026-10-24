@@ -80,6 +80,7 @@ export function Scan({
   useJobCompletion("scan", scanning && !pending, () => {
     setScanning(false);
     setEndedAt(Date.now());
+    void listInterfaces().then(setIfaces).catch(e => setError(String(e)));
     onBusy(false);
     setSnapshot((s) => ({ ...s, running: false, message: "Scan finished. Review the log for details." }));
   }, setError);
@@ -106,6 +107,7 @@ export function Scan({
         (s) => {
           if (session !== generation.current) return;
           setSnapshot(s);
+          if (native && s.running) setIfaces(items => items.map(i => i.name === s.interface ? { ...i, interfaceType: "monitor" } : i));
           setScanning(s.running);
           if (!s.running) setEndedAt(Date.now());
           onBusy(s.running);
@@ -126,6 +128,7 @@ export function Scan({
     setStopping(true);
     try {
       await stopScan();
+      void listInterfaces().then(setIfaces).catch(e => setError(String(e)));
       generation.current++;
       setEndedAt(Date.now());
       setScanning(false);
@@ -194,7 +197,7 @@ export function Scan({
         </div>
         <div className="scan-status" role="status">{snapshot.message}{scanning && selectedNetworks.length > 0 ? " · Stop the scan to review targets." : ""}</div>
       </section>
-      <Preflight interfaceName={iface} onInterfaces={onInterfaces}/>
+      <Preflight interfaceName={iface ? `${iface} · ${ifaces.find(i => i.name === iface)?.interfaceType ?? "unknown"}` : ""} onInterfaces={onInterfaces}/>
     </div>
     {snapshot.clients.length > 0 && <details className="client-disclosure"><summary>Observed clients ({snapshot.clients.length})</summary><div className="table-scroll"><table><thead><tr><th>Station MAC</th><th>Signal</th><th>Packets</th><th>BSSID</th></tr></thead><tbody>{snapshot.clients.map(c => <tr key={c.mac}><td>{c.mac}</td><td>{c.power} dBm</td><td>{c.packets}</td><td>{c.bssid}</td></tr>)}</tbody></table></div></details>}
   </>;
