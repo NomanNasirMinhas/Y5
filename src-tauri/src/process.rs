@@ -24,21 +24,18 @@ impl ChildGuard {
     pub fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
-    /// Ask the worker to stop and nudge the child with SIGINT so blocking reads return.
+    /// Ask the owning worker to stop. Only the owner signals/reaps its child.
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        let pid = self.pid.load(Ordering::SeqCst);
-        if pid != 0 {
-            signal_term(pid);
-        }
     }
 }
 
 /// Send SIGINT on Linux (so airodump-ng flushes its `.cap`/`.csv` files).
+#[cfg(target_os = "linux")]
 pub fn signal_term(pid: u32) {
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::kill(pid as i32, libc::SIGINT);
+        libc::kill(-(pid as i32), libc::SIGINT);
     }
     #[cfg(not(target_os = "linux"))]
     let _ = pid;
@@ -47,7 +44,13 @@ pub fn signal_term(pid: u32) {
 /// Spawn `program` with `args`, piping stdout and stderr; each line is forwarded to `tx`.
 /// The caller owns the returned `Child` for lifecycle management.
 pub fn spawn_logged(program: &str, args: &[String], tx: Sender<String>) -> std::io::Result<Child> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -85,12 +88,15 @@ pub fn reap(child: &mut Child) {
     #[cfg(target_os = "linux")]
     {
         signal_term(child.id());
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_millis(750);
         loop {
             if let Ok(Some(_)) = child.try_wait() {
                 return;
             }
             if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return;
@@ -136,7 +142,7 @@ pub fn run_bounded(program: &str, args: &[&str]) -> Result<Output, std::io::Erro
         });
     }
     drop(tx);
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -146,7 +152,7 @@ pub fn run_bounded(program: &str, args: &[&str]) -> Result<Output, std::io::Erro
             let _ = child.wait();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("{program} did not finish within 15 seconds"),
+                format!("{program} did not finish within 5 seconds"),
             ));
         }
         std::thread::sleep(Duration::from_millis(50));

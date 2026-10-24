@@ -55,3 +55,6 @@ thead th { text-transform:none; letter-spacing:0; font-family:inherit; font-size
 .networks-panel:has(.empty) .empty { min-height:340px; }
 
 .console-controls label { white-space:nowrap; }
+
+.network-table tbody td { font-size:14px; }
+.network-table tbody td.mono { font-size:12px; }

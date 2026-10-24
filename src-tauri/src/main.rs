@@ -35,14 +35,18 @@ fn clear_finished(slot: &mut Option<Job>) {
 }
 
 #[tauri::command]
-fn job_running(state: State<'_, AppState>, kind: String) -> Result<bool, String> {
+async fn job_running(state: State<'_, AppState>, kind: String) -> Result<bool, String> {
     let slot = match kind.as_str() {
         "scan" => &state.scan,
         "attack" => &state.attack,
         "crack" => &state.crack,
         _ => return Err("Unknown job kind".into()),
     };
-    let mut slot = slot.lock().map_err(|e| e.to_string())?;
+    let mut slot = match slot.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(true),
+        Err(e) => return Err(e.to_string()),
+    };
     clear_finished(&mut slot);
     Ok(slot.is_some())
 }
@@ -113,211 +117,237 @@ async fn check_kill() -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+fn launch_radio(
+    app: tauri::AppHandle,
+    kind: &str,
+    interface: String,
+    logs: Channel<LogEvent>,
+    launch: impl FnOnce(String) -> Result<(Arc<ChildGuard>, JoinHandle<()>), String> + Send + 'static,
+) -> Result<(), String> {
+    validation::interface(&interface)?;
+    let state = app.state::<AppState>();
+    let mut scan = state.scan.lock().map_err(|e| e.to_string())?;
+    let mut attack = state.attack.lock().map_err(|e| e.to_string())?;
+    clear_finished(&mut scan);
+    clear_finished(&mut attack);
+    if scan.is_some() || attack.is_some() || state.closing.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(
+            "A radio operation is still running or restoring its interface. Wait for it to finish."
+                .into(),
+        );
+    }
+    let guard = ChildGuard::new();
+    let worker_guard = guard.clone();
+    let handle = app.clone();
+    let thread = std::thread::spawn(move || {
+        let report = |level: &str, message: String| {
+            let _ = logs.send(LogEvent {
+                level: level.into(),
+                message,
+                timestamp: now(),
+            });
+        };
+        report("info", format!("Preparing {interface} for monitor mode…"));
+        let state = handle.state::<AppState>();
+        // Track before setup so a partial setup failure remains recoverable on close.
+        if let Ok(mut radios) = state.radios.lock() {
+            radios.insert(interface.clone());
+        }
+        let result = (|| {
+            if worker_guard.stop_requested() {
+                return Ok(());
+            }
+            let monitor = wifi::start_monitor(&interface)?;
+            if worker_guard.stop_requested() {
+                return Ok(());
+            }
+            report("info", format!("{monitor}: monitor mode ready"));
+            let (child_guard, child_thread) = launch(monitor)?;
+            while !child_thread.is_finished() {
+                if worker_guard.stop_requested() {
+                    child_guard.request_stop();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            child_thread
+                .join()
+                .map_err(|_| "Radio worker failed".to_string())?;
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = result {
+            report("error", error);
+        }
+        report("info", format!("Restoring {interface} to managed mode…"));
+        match wifi::stop_monitor(&interface) {
+            Ok(_) => {
+                if let Ok(mut radios) = state.radios.lock() {
+                    radios.remove(&interface);
+                }
+                report("info", format!("{interface}: managed mode restored"));
+            }
+            Err(error) => {
+                report("error", format!("Radio recovery failed: {error}"));
+                let _ = handle.emit("recovery-error", error);
+            }
+        }
+    });
+    let job = Some(Job { guard, thread });
+    if kind == "scan" {
+        *scan = job;
+    } else {
+        *attack = job;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn start_scan(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
     interface: String,
     channel: Option<i32>,
     snapshots: Channel<ScanSnapshot>,
     logs: Channel<LogEvent>,
 ) -> Result<(), String> {
-    validation::interface(&interface)?;
     if let Some(ch) = channel {
         validation::channel(ch)?;
     }
-
-    wifi::require_monitor(&interface)?;
-    state
-        .radios
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(interface.clone());
-    let mut slot = state.scan.lock().map_err(|e| e.to_string())?;
-    clear_finished(&mut slot);
-    if slot.is_some() {
-        return Err("A scan is already running.".into());
-    }
-    let prefix = state
+    let prefix = app
+        .state::<AppState>()
         .scans_root
         .join(format!("scan-{}", now()))
         .to_string_lossy()
         .into_owned();
-    let (guard, thread) = capture::start(interface, channel, prefix, snapshots, logs)?;
-    *slot = Some(Job { guard, thread });
-    Ok(())
+    let worker_logs = logs.clone();
+    launch_radio(app, "scan", interface, logs, move |iface| {
+        capture::start(iface, channel, prefix, snapshots, worker_logs)
+    })
 }
 
+async fn stop_radio(app: tauri::AppHandle, kind: &'static str) -> Result<(), String> {
+    // Stop requests return immediately. The supervisor owns shutdown and recovery;
+    // job_running remains true until both have finished.
+    let state = app.state::<AppState>();
+    let slot = if kind == "scan" {
+        &state.scan
+    } else {
+        &state.attack
+    };
+    let slot = slot.lock().map_err(|e| e.to_string())?;
+    if let Some(job) = slot.as_ref() {
+        job.guard.request_stop();
+    }
+    Ok(())
+}
 #[tauri::command]
 async fn stop_scan(app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let mut slot = state.scan.lock().map_err(|e| e.to_string())?;
-        if let Some(job) = slot.take() {
-            stop_job(job);
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    stop_radio(app, "scan").await
+}
+#[tauri::command]
+async fn stop_attack(app: tauri::AppHandle) -> Result<(), String> {
+    stop_radio(app, "attack").await
 }
 
 #[tauri::command]
 async fn deauth(
+    app: tauri::AppHandle,
     interface: String,
     bssid: String,
     client: Option<String>,
+    channel: i32,
     count: u32,
     logs: Channel<LogEvent>,
 ) -> Result<(), String> {
-    validation::interface(&interface)?;
     validation::mac(&bssid)?;
+    validation::channel(channel)?;
     if let Some(ref c) = client {
         validation::mac(c)?;
     }
     if !(1..=9999).contains(&count) {
         return Err("Packet count must be from 1 to 9999.".into());
     }
-
-    tauri::async_runtime::spawn_blocking(move || {
-        attack::deauth_once(&interface, &bssid, client.as_deref(), count, &logs)
+    let worker_logs = logs.clone();
+    launch_radio(app, "attack", interface, logs, move |iface| {
+        wifi::set_channel(&iface, channel)?;
+        attack::deauth_job(iface, bssid, client, count, worker_logs)
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
-
 #[tauri::command]
 async fn start_deauth(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
     interface: String,
     bssid: String,
     client: Option<String>,
+    channel: i32,
     logs: Channel<LogEvent>,
 ) -> Result<(), String> {
-    validation::interface(&interface)?;
     validation::mac(&bssid)?;
+    validation::channel(channel)?;
     if let Some(ref c) = client {
         validation::mac(c)?;
     }
-
-    wifi::require_monitor(&interface)?;
-    state
-        .radios
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(interface.clone());
-    let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
-    clear_finished(&mut slot);
-    if slot.is_some() {
-        return Err("An attack is already running.".into());
-    }
-    let (guard, thread) = attack::deauth_loop(interface, bssid, client, logs)?;
-    *slot = Some(Job { guard, thread });
-    Ok(())
+    let worker_logs = logs.clone();
+    launch_radio(app, "attack", interface, logs, move |iface| {
+        wifi::set_channel(&iface, channel)?;
+        attack::deauth_job(iface, bssid, client, 0, worker_logs)
+    })
 }
-
 #[tauri::command]
 async fn capture_handshake(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
     interface: String,
     bssid: String,
     channel: i32,
     logs: Channel<LogEvent>,
 ) -> Result<(), String> {
-    validation::interface(&interface)?;
     validation::mac(&bssid)?;
     validation::channel(channel)?;
-
-    wifi::require_monitor(&interface)?;
-    state
-        .radios
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(interface.clone());
-    let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
-    clear_finished(&mut slot);
-    if slot.is_some() {
-        return Err("An attack is already running.".into());
-    }
-    let prefix = state
+    let prefix = app
+        .state::<AppState>()
         .scans_root
         .join(format!("hs-{}", now()))
         .to_string_lossy()
         .into_owned();
-    let (guard, thread) = attack::capture_handshake(interface, bssid, channel, prefix, logs)?;
-    *slot = Some(Job { guard, thread });
-    Ok(())
+    let worker_logs = logs.clone();
+    launch_radio(app, "attack", interface, logs, move |iface| {
+        attack::capture_handshake(iface, bssid, channel, prefix, worker_logs)
+    })
 }
-
 #[tauri::command]
 async fn capture_pmkid(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
     interface: String,
     bssid: String,
     channel: i32,
     logs: Channel<LogEvent>,
 ) -> Result<(), String> {
-    validation::interface(&interface)?;
     validation::mac(&bssid)?;
     validation::channel(channel)?;
-
-    wifi::require_monitor(&interface)?;
-    state
-        .radios
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(interface.clone());
-    let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
-    clear_finished(&mut slot);
-    if slot.is_some() {
-        return Err("An attack is already running.".into());
-    }
-    let prefix = state
+    let prefix = app
+        .state::<AppState>()
         .scans_root
         .join(format!("pmkid-{}", now()))
         .to_string_lossy()
         .into_owned();
-    let (guard, thread) = attack::capture_pmkid(interface, bssid, channel, prefix, logs)?;
-    *slot = Some(Job { guard, thread });
-    Ok(())
+    let worker_logs = logs.clone();
+    launch_radio(app, "attack", interface, logs, move |iface| {
+        attack::capture_pmkid(iface, bssid, channel, prefix, worker_logs)
+    })
 }
-
 #[tauri::command]
 async fn wps_attack(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
     interface: String,
     bssid: String,
     channel: i32,
     logs: Channel<LogEvent>,
 ) -> Result<(), String> {
-    validation::interface(&interface)?;
     validation::mac(&bssid)?;
     validation::channel(channel)?;
-
-    wifi::require_monitor(&interface)?;
-    state
-        .radios
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(interface.clone());
-    let mut slot = state.attack.lock().map_err(|e| e.to_string())?;
-    clear_finished(&mut slot);
-    if slot.is_some() {
-        return Err("An attack is already running.".into());
-    }
-    let (guard, thread) = attack::wps_attack(interface, bssid, channel, logs)?;
-    *slot = Some(Job { guard, thread });
-    Ok(())
-}
-
-#[tauri::command]
-async fn stop_attack(state: State<'_, AppState>) -> Result<(), String> {
-    let job = state.attack.lock().map_err(|e| e.to_string())?.take();
-    if let Some(job) = job {
-        tauri::async_runtime::spawn_blocking(move || stop_job(job))
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    let worker_logs = logs.clone();
+    launch_radio(app, "attack", interface, logs, move |iface| {
+        attack::wps_attack(iface, bssid, channel, worker_logs)
+    })
 }
 
 #[tauri::command]

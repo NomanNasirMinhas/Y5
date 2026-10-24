@@ -16,3 +16,11 @@ The current implementation uses a neutral graphite/amber palette with its existi
 - Normal close and the manual recovery control stop jobs and restore radios used in the session to managed mode. Recovery errors keep the window open. Forced termination, VM shutdown and crashes cannot run this cleanup; use Interfaces to recover after restarting.
 
 Linux hardware validation is still required: scan/stop/restart on the Alfa adapter, close while scanning, already-monitor startup, managed recovery, disconnected USB and missing-tool cases. Automated checks on Windows cannot validate Linux drivers or radio state changes.
+
+## Implemented slate interface and automatic radio lifecycle
+
+The selected slate/cyan design is now implemented, with working top tabs, responsive cards, network selection, diagnostics, recovery toggle, scan duration and activity filtering. The app shows actual available fields (clients rather than an unimplemented vendor lookup) and labels browser tool checks as preview-only.
+
+Starting a scan or target job prepares the selected interface in place with iw/ip. Jobs return it to managed mode on completion, cancellation or startup failure. Radio setup and recovery run on a supervisor thread; stop commands signal cancellation immediately, while the UI stays in Stopping until cleanup finishes. Status polling never blocks on a worker-held lock. A silent-subprocess cancellation regression checks that attack stopping does not depend on output arriving. Linux child tools get their own process group for coordinated termination. The app prevents overlapping radio jobs during setup, execution and cleanup.
+
+The exit preference controls fallback cleanup for manually configured session radios; normal job completion always restores managed mode. Driver or permission errors are surfaced rather than reported as successful recovery. Linux hardware validation remains necessary.
