@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Y5",
+  "version": "0.1.0",
+  "identifier": "local.y5.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Y5",
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1040,
+        "minHeight": 740,
+        "backgroundColor": "#f5f8fa"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_YOUR_PUBKEY_RUN_tauri_signer_generate",
+      "endpoints": [
+        "https://github.com/NomanNasirMinhas/Y5/releases/latest/download/latest_version.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+*.cap
+*.pcap
+*.pcapng
+*.csv
+*.netxml
+*.hccapx
+*.22000
+*.tsbuildinfo
+artifacts/
+release-assets/
+wordlists/

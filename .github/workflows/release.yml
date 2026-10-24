@@ -1,0 +1,192 @@
+name: Build and release Linux
+
+on:
+  push:
+    branches: [build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not cancel older pushes: each successful push gets its own release.
+jobs:
+  metadata:
+    if: github.ref == 'refs/heads/build' && github.event.deleted != true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check release helpers
+        run: |
+          node scripts/ci/check-release-helpers.mjs
+          node --test scripts/ci/check-latest-version.mjs
+      - id: meta
+        run: node scripts/ci/release-metadata.mjs
+
+  build:
+    needs: metadata
+    name: Build ${{ matrix.kind }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Packages are shared across distributions; architecture determines the build.
+          - kind: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+          - kind: linux-arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            rust-targets: aarch64-unknown-linux-gnu
+            bundles: deb,appimage
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      BUILD_KIND: ${{ matrix.kind }}
+      BUILD_TARGET: ${{ matrix.target }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      # Allows AppImage tooling on CI hosts without a mounted FUSE filesystem.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install Linux build dependencies and the aircrack-ng suite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config curl wget file libssl-dev \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf xdg-utils aircrack-ng iw
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.kind }}
+      - run: npm ci
+      - name: Require updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "Set the TAURI_SIGNING_PRIVATE_KEY repository secret before publishing signed updates."
+            exit 1
+          fi
+      - name: Test frontend and build assets for Rust tests
+        run: |
+          npm test
+          npm run build
+      - name: Check Rust
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Generate automatic version
+        id: meta
+        run: node scripts/ci/release-metadata.mjs
+      - name: Build installers
+        env:
+          RELEASE_CONFIG: ${{ steps.meta.outputs.config }}
+          BUNDLES: ${{ matrix.bundles }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUNDLES" --config "$RELEASE_CONFIG" -- --locked
+      - name: Sign Debian updater packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          for file in src-tauri/target/"$BUILD_TARGET"/release/bundle/deb/*.deb; do
+            node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$RELEASE_VERSION" "$file"
+          done
+      - name: Collect installers and checksums
+        run: node scripts/ci/collect-assets.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.kind }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: [metadata, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify downloaded assets
+        working-directory: release-assets
+        run: sha256sum --check SHA256SUMS-*.txt
+      - name: Generate complete update manifest
+        run: node scripts/ci/latest-version.mjs
+      - name: Create and publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Published releases are immutable from this workflow; reruns are safe.
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > release-state.txt 2>/dev/null; then
+            if [ "$(cat release-state.txt)" = 'false' ]; then
+              echo "This run already has a published release."
+              exit 0
+            fi
+          else
+            cat > release-notes.md <<NOTES
+          Automated build from the build branch.
+
+          Commit: $GITHUB_SHA
+          Version: $RELEASE_VERSION
+
+          Downloads:
+          - Linux x64: DEB for Debian, Ubuntu, Kali Linux and Parrot OS; AppImage for other compatible Linux distributions.
+          - Linux ARM64 / Raspberry Pi: DEB or AppImage for a compatible 64-bit desktop OS, including Raspberry Pi OS Bookworm or newer, Kali ARM64 and Ubuntu ARM64.
+          - Use the package matching your installed OS architecture. 32-bit Raspberry Pi OS / ARMv7 is not included.
+
+          These releases target Linux only. Builds use Ubuntu 22.04 as the compatibility baseline; a graphical desktop and Tauri v2's Linux runtime requirements are needed. AppImages support many distributions but are not guaranteed to run on every distribution or older glibc versions.
+          The full feature set (monitor mode, deauthentication, handshake/PMKID capture) requires a compatible wireless chipset (Atheros, Ralink or Realtek) and a system-installed aircrack-ng suite. The DEB pulls in aircrack-ng and iw automatically; AppImage users install those tools separately.
+          Y5 is for authorized security testing only — use it on networks you own or are permitted to test.
+          SHA256SUMS files accompany each platform. latest_version.json lists every binary, checksum, size, URL and updater signature. The app checks for signed updates at startup and asks before installing.
+          NOTES
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+              --title "Y5 $RELEASE_VERSION" --notes-file release-notes.md --draft
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          # A slower older push must not replace the current build as Latest.
+          latest=false
+          branch_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/build" --jq '.object.sha')"
+          if [ "$branch_sha" = "$GITHUB_SHA" ]; then latest=true; fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest="$latest"
