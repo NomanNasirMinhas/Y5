@@ -1,6 +1,0 @@
-{
-  "identifier": "default",
-  "description": "Main application access",
-  "windows": ["main"],
-  "permissions": ["core:default"]
-}

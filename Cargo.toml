@@ -1,0 +1,23 @@
+[package]
+name = "y5"
+version = "0.2.0"
+edition = "2021"
+description = "Resource-conscious terminal Wi-Fi audit console"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ctrlc = { version = "3", features = ["termination"] }
+fs2 = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+

@@ -13,3 +13,6 @@ src-tauri/target/
 artifacts/
 release-assets/
 wordlists/
+
+target/
+stage/

@@ -1,3 +1,5 @@
+> Historical desktop UI report. Current terminal validation: [docs/terminal-validation.md](docs/terminal-validation.md).
+
 # Y5 slate interface — design QA
 
 final result: passed
