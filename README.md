@@ -1,128 +1,100 @@
-# Y5
+# Y5 — Airwave Terminal Console
 
-![Y5 — Airwave Audit Console: a retro green CRT banner with wireless signal waves](docs/images/y5-banner.png)
+A Linux-first Wi-Fi audit console written in Rust with **Ratatui + Crossterm**, designed for local terminals and SSH on a Raspberry Pi 4 with 1 GB RAM. The desktop/WebView stack has been removed.
 
-A local-first WiFi security auditing dashboard built with **Tauri v2 + React**. It consolidates the workflows of **wifite** (automation), **kismet** (passive discovery), **airmon-ng** (monitor-mode management) and the **aircrack-ng** suite (deauth, handshake capture, WEP/WPA cracking) into one desktop app — shelling out to a system-installed aircrack-ng suite, the same way RF Radar shells out to its RTL-SDR driver.
+Use radio workflows only on networks you own or are authorized to test.
 
-> **Authorized testing only.** Deauthentication and cracking disrupt wireless networks and can recover keys. Use Y5 only on networks you own, or where you have explicit written permission to test.
+## Build and run
 
-## Features
+```bash
+cargo build --release --locked
+./target/release/y5 doctor
+sudo ./target/release/y5
+```
 
-| Workspace | What it does |
+Build on a stronger machine or use a CI package when possible; compiling on a 1 GB Pi can itself require substantial memory. A Pi running a 64-bit OS needs **ARM64**, not AMD64.
+
+```bash
+uname -m  # aarch64 on a 64-bit Pi OS
+sudo apt install aircrack-ng iw iproute2
+```
+
+Optional tools are detected individually: hcxdumptool, hcxtools, hashcat, reaver/bully, wifite, kismet, tshark and tcpdump. Install the packages needed for your workflow. Offline browsing/recovery does not require a wireless adapter. Live radio operations require Linux, appropriate privileges, and compatible driver/firmware.
+
+## Terminal flow
+
+Choose an adapter in Interfaces → press `s` to scan → select networks → stop with `x` → configure a workflow in Targets → press `g` to review and run.
+
+| Key | Action |
 | --- | --- |
-| **Scan** | Passive airodump-ng survey — live networks (BSSID, ESSID, channel, encryption, signal, client count) and associated stations. |
-| **Attacks** | Deauth (aireplay-ng), WPA handshake capture, PMKID capture (hcxdumptool), WPS recovery (reaver/bully). |
-| **Crack** | Offline recovery with two engines: **aircrack-ng** (wordlist) and **hashcat** (wordlist, wordlist + rules, or mask attacks) with live progress, speed and recovered-digest readouts — plus hashcat export (`.hccap` / `.22000`). |
-| **Interfaces** | List wireless interfaces and toggle monitor mode (airmon-ng), check-kill. |
-| **Log** | Unified stream of scan / attack / crack output. |
+| Tab / Shift+Tab / 1–7 | Switch workspace |
+| Up / Down | Navigate rows or form fields |
+| Enter | Select one network, select adapter/capture, or edit a field |
+| Space | Toggle network selection for a sequential queue |
+| `/` | Filter networks |
+| `v` on Networks | Switch between networks and associated clients |
+| Left / Right on Targets | Choose workflow |
+| `s` / `x` | Start scan / stop current job and clear queue |
+| `r` / `R` | Refresh diagnostics / recover recorded interface |
+| `g` | Review/run a workflow, or hand over the terminal on Tools |
+| `q` / Ctrl+C | Stop, restore the interface, then exit |
 
-## Platform reality
+The console has Overview, Networks, Targets, Captures, Interfaces, Tools and Logs workspaces. It supports small terminals, with a compact network layout. Field editing uses Enter to save and Esc to cancel. Errors appear in Logs; optional tools are not started at launch.
 
-- **Linux — full suite.** Monitor mode and packet injection require Linux with a compatible chipset (Atheros, Ralink or Realtek). This is where scanning, deauth, handshake/PMKID capture and WPS work.
-- **Windows / macOS — degraded source builds.** Offline cracking of existing captures and passive listing where the OS permits it. No monitor mode or injection. Automated releases currently provide Linux installers only.
+Native workflows include passive survey/client discovery, handshake and PMKID capture, WPS, deauthentication, Aircrack recovery, Hashcat wordlist/rules/mask recovery, conversion/export and Hashcat device diagnostics. Selected radio targets run sequentially. Hashcat status, recovered results and a persistent potfile remain available.
 
-## Prerequisites
+## Optional tool integrations
 
-Y5 does **not** bundle the aircrack-ng or hashcat binaries. Install them system-wide:
+Tools can hand the terminal to Wifite, Kismet, Hashcat, Tshark, Tcpdump, Aircrack, hcxtools, Reaver or Bully, then return to Y5. Enter arguments as a JSON string array, such as `["--help"]`; arguments are passed directly, never through a shell. For radio tools, select an adapter in Interfaces and also pass that adapter using the tool's own arguments.
 
-- **Linux (Debian/Ubuntu):** `sudo apt install aircrack-ng iw`
-  - Optional: `hcxdumptool` + `hcxpcapngtool` (PMKID), `reaver` or `bully` (WPS).
-- **Windows:** Install [Aircrack-ng](https://www.aircrack-ng.org/) and [hashcat](https://hashcat.net/hashcat/) (or the WSL path) and add them to `PATH`. Cracking works; injection does not.
-- **macOS:** `brew install aircrack-ng hashcat` — cracking only; injection does not.
-
-### hashcat engine
-
-The Crack workspace can run hashcat in-app (wordlist, wordlist + rules, or mask attacks) against captured handshakes. Y5 detects a system-installed `hashcat` at startup:
-
-- **Install:** `sudo apt install hashcat` (or see [hashcat.net](https://hashcat.net/hashcat/)).
-- **GPU acceleration** needs working OpenCL/CUDA drivers — on Debian/Ubuntu: `sudo apt install ocl-icd-opencl-dev` plus your vendor's driver. Without them hashcat falls back to CPU and warns; Y5 never passes `--force`, so driver problems surface instead of being masked.
-- **Capture conversion** is automatic: `.22000` files run as mode 22000, `.hccap`/`.hccapx` as mode 2500, and raw `.cap`/`.pcap` captures are converted with `hcxpcapngtool` (mode 22000) or, if that's absent, `aircrack-ng -J` (mode 2500). Install `hcxtools` for the best path: `sudo apt install hcxtools`.
-- **Rules** are picked up from `/usr/share/hashcat/rules`, hashcat's install directory, and the app's own `rules/` data folder (shown alongside captures/wordlists in-app).
-- **Potfile** lives in the app's data directory, so recovered keys are remembered between sessions and shown instantly via `hashcat --show`.
-
-For a compatible adapter, Atheros AR9271 (e.g. Alfa AWUS036NHA), Ralink RT3070 and Realtek RTL8812AU chipsets are common picks.
-
-## Development
+Equivalent command-line handoffs:
 
 ```bash
-npm ci
-npm run tauri -- dev          # desktop app (Linux for the full suite)
-npm run dev                   # browser demo with synthetic data
-npm test                      # Vitest (TS helpers)
-npm run check                 # UI regressions, production build, release helper checks
-npm run check:native          # Rust formatting, tests, Clippy
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+y5 tool hashcat -- --help
+y5 --interface wlan0 tool wifite -- --help
+y5 tool kismet -- --help
+y5 wordlists
+y5 rules
+y5 recover
 ```
 
-The browser preview (`npm run dev`) renders synthetic networks so the UI can be explored without a radio; attack and crack paths explain that they require the desktop app.
+`--interface` records the adapter for recovery; it is not substituted into upstream arguments. `y5 check-kill` explicitly runs airmon-ng's service-stop operation; it is never run automatically and may disconnect networking.
 
-### Verification
+Wifite/Kismet retain their upstream interfaces. Y5 does not independently reimplement every feature, and Kismet's device/alert API panels are not yet native TUI screens. See the [capability matrix and limitations](docs/ratatui-migration.md).
 
-Run `npm run check` and `npm run check:native` before and after changes. The
-Project checks workflow runs these on pushes and pull requests; the release
-workflow also verifies each platform before packaging.
+## Low-memory behavior
 
-Regression coverage includes scan start/stop, rejected stops, completion events
-arriving during startup, recovery results, target validation, combined AP/client
-CSV parsing, and completed worker cleanup. Runtime checks reject invalid target
-addresses, numeric ranges and missing input files. Job polling reconciles workers
-that exit without a terminal status event; failed stops keep controls available.
+No GUI runtime or background web server is needed. Rendering is event-driven and capped at 5 FPS. Log buffers, process output, scan snapshots and CSV reads are bounded. Native jobs run one at a time; stop requests do not wait on rendering. Native radio jobs enable monitor mode and restore managed mode on stop/completion. A persistent journal supports recovery after interruption.
 
-For UI changes, check all workspaces at desktop, tablet and phone widths, including
-horizontal table scrolling, keyboard navigation, the guide dialog and reduced
-motion. Browser checks use synthetic data. Actual monitor mode, capture, injection
-and recovery still require a separate authorized hardware test on the supported
-platform with the required tools installed.
+Hashcat and Kismet consume resources of their own. On a 1 GB Pi, capture locally and export hashes for a stronger computer when appropriate. No Raspberry Pi RAM/CPU numbers have yet been measured for this version; the resource targets are documented, not claimed as achieved.
 
-## Building installers
+## Data and upgrades
+
+`Y5_DATA_DIR` overrides storage. By default, Y5 uses `$XDG_DATA_HOME/y5` or `~/.local/share/y5`. If the previous Linux data folder `local.y5.desktop` exists under that base, it is reused without copying captures. Launch under the same user as before, or set the old data path explicitly when using sudo. Scans, wordlists and rules retain their subdirectories.
+
+The desktop updater is removed. Install terminal updates explicitly using `.deb` packages or replace the standalone binary after verifying its checksum and GitHub provenance:
 
 ```bash
-npm run tauri -- build        # bundles for the current platform
+gh attestation verify y5_0.2.0+build.N_arm64.deb -R NomanNasirMinhas/Y5
+sudo apt install ./y5_0.2.0+build.N_arm64.deb
 ```
 
-CI (`push` to the `build` branch, or a manual run on that branch) currently publishes **Linux only**:
+Replace N with the downloaded release build number. The command above applies to a newly published terminal artifact, not earlier desktop releases. CI publishes prereleases only from `build`, after Rust tests and lint checks. Packages include SHA256 checksums and GitHub artifact attestations; the old updater signing secrets are no longer used.
 
-| Architecture | Downloads | Intended systems |
+| CI architecture | Artifacts | Build baseline |
 | --- | --- | --- |
-| x86_64 / AMD64 | `.deb`, `.AppImage` | Debian, Ubuntu, Kali Linux, Parrot OS, and other compatible Linux desktops |
-| ARM64 / aarch64 | `.deb`, `.AppImage` | Raspberry Pi with a 64-bit desktop OS (Raspberry Pi OS Bookworm or newer), Kali ARM64, Ubuntu ARM64, and compatible ARM64 desktops |
+| AMD64 | `.deb`, `.tar.gz` | Ubuntu 22.04 / glibc 2.35 |
+| ARM64 (Pi 4, 64-bit OS) | `.deb`, `.tar.gz` | Ubuntu 24.04 / glibc 2.39 |
 
-Choose the architecture of your installed OS. The same package serves compatible
-distributions; there are no separate Kali or Parrot builds. DEB packages install
-`aircrack-ng`, `iw`, and `xdg-utils` dependencies; AppImage users must install the
-wireless tools separately. Both architectures include signed updater artifacts
-and checksums, and the updater manifest requires all four Linux packages.
+The DEB records its glibc requirement. Older distributions need a source build on a compatible baseline. ARMv7 packaging is not yet enabled. No desktop session, AppImage, Node, GTK or WebKit is required.
 
-Builds use Ubuntu 22.04 as the compatibility baseline and need a graphical desktop
-and the Tauri v2 Linux runtime. AppImage portability does not guarantee every Linux
-distribution or older glibc release. 32-bit ARMv7 / Raspberry Pi OS and headless
-systems are not supported by these installers. Windows and macOS release jobs are
-disabled for now; their source build support remains available.
-
-### Updater signing
-
-The updater needs a keypair. Generate one once, publish the public key into `src-tauri/tauri.conf.json`, and store the private key as a GitHub Actions secret:
+## Development checks
 
 ```bash
-npx @tauri-apps/cli signer generate -w ~/.tauri/y5.key
-# The printed public key goes into src-tauri/tauri.conf.json -> plugins.updater.pubkey.
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --release --locked
 ```
 
-Then add repository secrets:
-
-- `TAURI_SIGNING_PRIVATE_KEY` — contents of the generated key file.
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — its password (if set).
-
-## Project layout
-
-```
-src/                 React frontend (App shell, Scan/Attacks/Crack/Interfaces/Log tabs, bridge + demo fallback)
-src-tauri/src/       Rust backend (process orchestration, wifi, capture, attack, crack, hashcat, replay, updater)
-scripts/ci/          Release metadata, asset collection, manifest generation + self-checks
-.github/workflows/   Build-and-release matrix
-```
-
-## Credits
-
-Architecture, stack and CI conventions mirror [RF Radar](https://github.com/NomanNasirMinhas/RF-Radar). Y5 is for educational and authorized security testing.
+Tests cover parsers, target validation, bounded log/output handling, cancellation and TUI layouts. Actual adapter switching, Linux process-group cleanup, external terminal handoffs and 1 GB Pi performance require the [hardware validation checklist](docs/ratatui-migration.md).
